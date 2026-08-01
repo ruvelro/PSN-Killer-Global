@@ -24,10 +24,12 @@ Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTki
 * **💿 Cola Persistente y Reanudación:** Guarda `download_queue.json` y usa archivos `.part` para continuar descargas parciales cuando el servidor admite rangos.
 * **✅ Verificación SHA256:** Si el catálogo incluye hash, valida el archivo al terminar y lo marca como verificado o corrupto.
 * **🔄 Actualizador de Catálogos:** Puede refrescar los TSV desde URLs configurables, guardando backup local y fecha de actualización.
+* **🗄️ SQLite Local:** Indexa los catálogos en `data/catalog.sqlite3` y reconstruye la base cuando cambian los TSV.
 * **🧩 Completar Biblioteca:** Analiza lo que ya hay en `Descargas/` y propone contenido relacionado pendiente.
+* **📋 Faltantes Global:** Lista por plataforma todos los juegos con contenido pendiente y permite descargarlo en lote.
 * **🔎 Detalles por Juego:** Doble clic en Biblioteca para ver archivos, rutas, estado, SHA256 y completar faltantes.
 * **🎚️ Filtros Avanzados:** Filtra por estado de descarga e integridad además de plataforma, nombre, Title ID y región.
-* **⚙️ Configuración:** Ajusta carpeta de descargas, descargas simultáneas, hilos por archivo, auto-reanudar cola y accesos a fuentes/logs.
+* **⚙️ Configuración:** Ajusta carpeta de descargas, descargas simultáneas, hilos por archivo, perfil, auto-reanudar cola, auto-actualizar catálogos y accesos a fuentes/logs.
 * **💾 Exportación:** Exporta biblioteca y cola a JSON, o la vista activa a CSV.
 * **🔑 Soporte para Licencias:** Botón de acceso directo para descargar paquetes de licencias RAP universales.
 * **🎨 Interfaz Oscura Minimalista:** Desarrollada con CustomTkinter para una experiencia visual limpia y moderna.
@@ -80,9 +82,9 @@ Los lanzadores comprueban Python, crean `.venv`, instalan `requirements.txt` y a
 
 Los catálogos TSV deben vivir en la carpeta `data/`. La raíz del proyecto queda reservada para la app, lanzadores, documentación y assets principales.
 
-Para activar el actualizador de catálogos, copia `catalog_sources.example.json` a `catalog_sources.json` y sustituye las URLs por tus fuentes TSV reales. Cada actualización guarda backups en `data/backups/` y el estado en `data/catalog_state.json`.
+Por defecto, el actualizador descarga desde `https://nopaystation.com/tsv/<nombre.tsv>`. Para cambiar la fuente global o añadir mirrors, copia `catalog_sources.example.json` a `catalog_sources.json` y ajusta `primary_base_url`, `fallback_base_urls` o las fuentes por archivo. Cada actualización valida que el TSV tenga filas útiles antes de reemplazar el anterior; si la fuente nueva viene vacía o rota, conserva el catálogo local y prueba los fallbacks configurados. Los backups se guardan en `data/backups/` y el estado en `data/catalog_state.json`.
 
-La configuración local se guarda en `app_config.json`, la cola en `download_queue.json` y los logs técnicos en `logs/app.log`. Estos archivos no se versionan.
+La configuración local se guarda en `app_config.json`, la cola en `download_queue.json`, la caché SQLite en `data/catalog.sqlite3` y los logs técnicos en `logs/app.log`. Estos archivos no se versionan.
 
 ### Uso manual
 

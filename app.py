@@ -61,6 +61,7 @@ import threading
 import hashlib
 import shutil
 import logging
+import sqlite3
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -79,8 +80,10 @@ APP_CONFIG_PATH = os.path.join(BASE_DIR, "app_config.json")
 CATALOG_SOURCES_PATH = os.path.join(BASE_DIR, "catalog_sources.json")
 CATALOG_STATE_PATH = os.path.join(DATA_DIR, "catalog_state.json")
 CATALOG_BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+CATALOG_DB_PATH = os.path.join(DATA_DIR, "catalog.sqlite3")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 LOG_PATH = os.path.join(LOG_DIR, "app.log")
+NPS_TSV_BASE_URL = "https://nopaystation.com/tsv"
 
 # URL directa al pack de licencias
 GITHUB_RAP_URL = "https://github.com/TheWizWikii/PS3-Stuff-Repository/releases/download/3/License_Pack_31.153.pkg"
@@ -304,6 +307,10 @@ DEFAULT_APP_CONFIG = {
     "max_active_downloads": 2,
     "threads_per_download": 16,
     "auto_resume_queue": False,
+    "catalog_primary_base_url": NPS_TSV_BASE_URL,
+    "catalog_fallback_base_urls": [],
+    "catalog_update_interval_days": 0,
+    "download_profile": "Completo seguro",
 }
 MAX_ACTIVE_DOWNLOADS = DEFAULT_APP_CONFIG["max_active_downloads"]
 DOWNLOAD_FOLDER_TO_CATEGORY = {
@@ -318,6 +325,12 @@ TITLE_STOPWORDS = {
     "the", "a", "an", "and", "of", "for", "to", "in", "on", "with", "edition",
     "game", "pack", "bundle", "level", "map", "skin", "costume", "theme", "avatar",
     "dlc", "update", "add", "on", "content", "ps3", "psp", "psv", "vita", "psn"
+}
+DOWNLOAD_PROFILES = {
+    "Base + última update": {"base": True, "latest_update": True, "exact_extras": False, "suggested": False},
+    "Completo seguro": {"base": True, "latest_update": True, "exact_extras": True, "suggested": False},
+    "Preservación completa": {"base": True, "latest_update": False, "exact_extras": True, "suggested": True},
+    "Solo verificados": {"base": True, "latest_update": True, "exact_extras": True, "suggested": False, "require_sha256": True},
 }
 
 
@@ -462,6 +475,7 @@ class PSNDownloaderApp(ctk.CTk):
         self.refresh_queue_view()
         if self.app_config.get("auto_resume_queue"):
             self.schedule_downloads()
+        self.maybe_update_catalogs_on_start()
 
     def setup_dark_theme(self):
         """ Configura el estilo oscuro minimalista para los Treeview de Tkinter """
@@ -750,6 +764,10 @@ class PSNDownloaderApp(ctk.CTk):
         self.tabs["Cola"] = queue_tab
         self._build_queue_view(queue_tab)
 
+        history_tab = self.tabview.add("Historial")
+        self.tabs["Historial"] = history_tab
+        self._build_history_view(history_tab)
+
     def change_platform(self, platform):
         self.current_platform = platform
         self.data_store = self.catalog[self.current_platform]
@@ -861,6 +879,15 @@ class PSNDownloaderApp(ctk.CTk):
         details_btn = ctk.CTkButton(btn_frame, text="🔎 Detalles", command=self.open_selected_library_details)
         details_btn.pack(side="left", fill="x", expand=True, padx=4)
 
+        missing_btn = ctk.CTkButton(btn_frame, text="📋 Faltantes", command=self.open_global_missing_dialog)
+        missing_btn.pack(side="left", fill="x", expand=True, padx=4)
+
+        verify_btn = ctk.CTkButton(btn_frame, text="✅ Verificar", command=self.verify_library_integrity)
+        verify_btn.pack(side="left", fill="x", expand=True, padx=4)
+
+        repair_btn = ctk.CTkButton(btn_frame, text="🛠️ Reparar corruptos", command=self.repair_corrupt_downloads)
+        repair_btn.pack(side="left", fill="x", expand=True, padx=4)
+
         open_btn = ctk.CTkButton(btn_frame, text="📂 Abrir carpeta Descargas", command=self.open_downloads_folder)
         open_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
@@ -906,6 +933,31 @@ class PSNDownloaderApp(ctk.CTk):
         ctk.CTkButton(btn_frame, text="✖️ Cancelar", fg_color="#7d2d2d", hover_color="#662323", command=self.cancel_selected_tasks).pack(side="left", fill="x", expand=True, padx=(4, 0))
 
         self.refresh_queue_view()
+
+    def _build_history_view(self, parent):
+        columns = ("created_at", "action", "platform", "name", "status", "details")
+        self.history_tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
+        headings = {
+            "created_at": "Fecha",
+            "action": "Acción",
+            "platform": "Plataforma",
+            "name": "Elemento",
+            "status": "Estado",
+            "details": "Detalles",
+        }
+        widths = {"created_at": 150, "action": 150, "platform": 90, "name": 300, "status": 100, "details": 520}
+        for col in columns:
+            self.history_tree.heading(col, text=headings[col])
+            self.history_tree.column(col, width=widths[col], anchor="w" if col in {"name", "details"} else "center")
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.history_tree.yview)
+        self.history_tree.configure(yscrollcommand=scrollbar.set)
+        self.history_tree.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        scrollbar.pack(side="right", fill="y", pady=5)
+
+        btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        btn_frame.pack(side="bottom", fill="x", padx=5, pady=5)
+        ctk.CTkButton(btn_frame, text="🔄 Actualizar historial", command=self.refresh_history_view).pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.refresh_history_view()
 
     def add_content_item(
         self,
@@ -1042,28 +1094,285 @@ class PSNDownloaderApp(ctk.CTk):
                 if parsed:
                     self.add_content_item(**parsed)
 
-    def load_all_data(self):
+    def catalog_files_metadata(self):
+        metadata = {}
+        for files in PLATFORM_CATALOGS.values():
+            for file_name in files.values():
+                path = data_path(file_name)
+                metadata[file_name] = {
+                    "mtime": os.path.getmtime(path) if os.path.exists(path) else 0,
+                    "size": os.path.getsize(path) if os.path.exists(path) else 0,
+                }
+        return metadata
+
+    def init_catalog_db(self):
+        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if user_version > 1:
+                logging.warning("SQLite schema más nuevo de lo esperado: %s", user_version)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS catalog_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    platform TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    title_id TEXT,
+                    region TEXT,
+                    name TEXT,
+                    version TEXT,
+                    size TEXT,
+                    size_bytes INTEGER DEFAULT 0,
+                    url TEXT,
+                    content_id TEXT,
+                    license_value TEXT,
+                    sha256 TEXT,
+                    required_fw TEXT,
+                    original_name TEXT,
+                    item_type TEXT,
+                    normalized_name TEXT,
+                    UNIQUE(platform, category, title_id, version, url)
+                )
+            """)
+            conn.execute("PRAGMA user_version=1")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_catalog_platform_category ON catalog_items(platform, category)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_catalog_title_id ON catalog_items(title_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_catalog_normalized_name ON catalog_items(normalized_name)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS catalog_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS action_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    platform TEXT,
+                    category TEXT,
+                    name TEXT,
+                    status TEXT,
+                    details TEXT
+                )
+            """)
+
+    def catalog_db_is_current(self):
+        if not os.path.exists(CATALOG_DB_PATH):
+            return False
+        self.init_catalog_db()
+        current = self.catalog_files_metadata()
+        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+            row = conn.execute("SELECT value FROM catalog_meta WHERE key='tsv_metadata'").fetchone()
+            count = conn.execute("SELECT COUNT(*) FROM catalog_items").fetchone()[0]
+        if not row or not count:
+            return False
+        try:
+            return json.loads(row[0]) == current
+        except json.JSONDecodeError:
+            return False
+
+    def save_catalog_to_db(self):
+        self.init_catalog_db()
+        metadata = self.catalog_files_metadata()
+        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+            conn.execute("DELETE FROM catalog_items")
+            rows = []
+            for platform, categories in self.catalog.items():
+                for category, items in categories.items():
+                    for item in items:
+                        rows.append((
+                            platform, category, item.title_id, item.region, item.name, item.version,
+                            item.size, parse_size_to_bytes(item.size), item.url, item.content_id,
+                            item.license_value, item.sha256, item.required_fw, item.original_name,
+                            item.item_type, normalize_title(item.name)
+                        ))
+            conn.executemany("""
+                INSERT OR REPLACE INTO catalog_items (
+                    platform, category, title_id, region, name, version, size, size_bytes,
+                    url, content_id, license_value, sha256, required_fw, original_name,
+                    item_type, normalized_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
+            conn.execute(
+                "INSERT OR REPLACE INTO catalog_meta(key, value) VALUES('tsv_metadata', ?)",
+                (json.dumps(metadata, sort_keys=True),)
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO catalog_meta(key, value) VALUES('rebuilt_at', ?)",
+                (datetime.now().isoformat(timespec="seconds"),)
+            )
+        logging.info("SQLite reconstruido: %d elemento(s)", len(rows))
+
+    def load_catalog_from_db(self):
+        self.init_catalog_db()
         self.catalog = {
             platform: {category: [] for category in CONTENT_ORDER}
             for platform in PLATFORM_CATALOGS
         }
         self.content_by_url = {}
-        for platform, files in PLATFORM_CATALOGS.items():
-            for category, file_name in files.items():
-                self.load_tsv_catalog(platform, category, file_name)
+        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT platform, category, title_id, region, name, version, size, url,
+                       content_id, license_value, sha256, required_fw, original_name, item_type
+                FROM catalog_items
+                ORDER BY id
+            """).fetchall()
+        for row in rows:
+            self.add_content_item(
+                platform=row["platform"],
+                category=row["category"],
+                title_id=row["title_id"] or "",
+                region=row["region"] or "",
+                name=row["name"] or "",
+                version=row["version"] or "",
+                size=row["size"] or "",
+                url=row["url"] or "",
+                content_id=row["content_id"] or "",
+                license_value=row["license_value"] or "",
+                sha256=row["sha256"] or "",
+                required_fw=row["required_fw"] or "",
+                original_name=row["original_name"] or "",
+                item_type=row["item_type"] or "",
+            )
+
+    def record_history(self, action, platform="", category="", name="", status="", details=None):
+        self.init_catalog_db()
+        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO action_history(created_at, action, platform, category, name, status, details)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now().isoformat(timespec="seconds"),
+                    action,
+                    platform,
+                    category,
+                    name,
+                    status,
+                    json.dumps(details or {}, ensure_ascii=False),
+                )
+            )
+        self.after(0, self.refresh_history_view)
+
+    def history_report_rows(self, limit=500):
+        self.init_catalog_db()
+        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT created_at, action, platform, category, name, status, details
+                FROM action_history
+                ORDER BY id DESC
+                LIMIT ?
+            """, (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def refresh_history_view(self):
+        if not hasattr(self, "history_tree"):
+            return
+        self.history_tree.delete(*self.history_tree.get_children())
+        for row in self.history_report_rows():
+            self.history_tree.insert(
+                "",
+                "end",
+                values=(
+                    row.get("created_at", ""),
+                    row.get("action", ""),
+                    row.get("platform", ""),
+                    row.get("name", ""),
+                    row.get("status", ""),
+                    row.get("details", ""),
+                )
+            )
+
+    def load_all_data(self):
+        if self.catalog_db_is_current():
+            self.load_catalog_from_db()
+        else:
+            self.catalog = {
+                platform: {category: [] for category in CONTENT_ORDER}
+                for platform in PLATFORM_CATALOGS
+            }
+            self.content_by_url = {}
+            for platform, files in PLATFORM_CATALOGS.items():
+                for category, file_name in files.items():
+                    self.load_tsv_catalog(platform, category, file_name)
+            self.save_catalog_to_db()
 
         self.data_store = self.catalog[self.current_platform]
         self.populate_trees()
 
     def load_catalog_sources(self):
+        default_sources = {
+            file_name: {
+                "primary": f"{self.app_config.get('catalog_primary_base_url', NPS_TSV_BASE_URL).rstrip('/')}/{file_name}",
+                "fallbacks": [
+                    f"{base.rstrip('/')}/{file_name}"
+                    for base in self.app_config.get("catalog_fallback_base_urls", [])
+                    if isinstance(base, str) and base.strip()
+                ],
+            }
+            for files in PLATFORM_CATALOGS.values()
+            for file_name in files.values()
+        }
         if not os.path.exists(CATALOG_SOURCES_PATH):
-            return {}
+            return default_sources
         try:
             with open(CATALOG_SOURCES_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return data if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                return default_sources
+            primary_base_url = data.get("primary_base_url")
+            fallback_base_urls = data.get("fallback_base_urls")
+            if isinstance(primary_base_url, str) and primary_base_url.strip():
+                for file_name in default_sources:
+                    default_sources[file_name]["primary"] = f"{primary_base_url.rstrip('/')}/{file_name}"
+            if isinstance(fallback_base_urls, list):
+                for file_name in default_sources:
+                    default_sources[file_name]["fallbacks"] = [
+                        f"{base.rstrip('/')}/{file_name}"
+                        for base in fallback_base_urls
+                        if isinstance(base, str) and base.strip()
+                    ]
+            raw_sources = data.get("sources", data)
+            for file_name, config in raw_sources.items():
+                safe_name = os.path.basename(file_name)
+                if safe_name not in default_sources:
+                    continue
+                if isinstance(config, str):
+                    default_sources[safe_name]["primary"] = config
+                elif isinstance(config, dict):
+                    if config.get("primary"):
+                        default_sources[safe_name]["primary"] = config["primary"]
+                    if isinstance(config.get("fallbacks"), list):
+                        default_sources[safe_name]["fallbacks"] = config["fallbacks"]
+            return default_sources
         except (json.JSONDecodeError, OSError):
-            return {}
+            return default_sources
+
+    def validate_catalog_file(self, file_path, platform, category, current_count=0):
+        parsed = 0
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                reader = csv.reader(f, delimiter="\t")
+                first_row = next(reader, None)
+                if not first_row:
+                    return False, 0, "catálogo vacío"
+                has_header = first_row[0].strip().lower() in ["title id", "id", "title_id"]
+                header = {name.strip().lower(): index for index, name in enumerate(first_row)} if has_header else None
+                rows = reader if has_header else [first_row, *reader]
+                for row in rows:
+                    if self.parse_catalog_row(platform, category, row, header):
+                        parsed += 1
+        except OSError as e:
+            return False, 0, str(e)
+
+        if parsed == 0:
+            return False, parsed, "sin filas válidas con URL"
+        if current_count >= 50 and parsed < max(10, int(current_count * 0.25)):
+            return False, parsed, f"demasiado pequeño frente al catálogo actual ({parsed}/{current_count})"
+        return True, parsed, ""
 
     def save_catalog_state(self, state):
         with open(CATALOG_STATE_PATH, "w", encoding="utf-8") as f:
@@ -1081,14 +1390,26 @@ class PSNDownloaderApp(ctk.CTk):
 
     def update_catalogs_from_sources(self):
         sources = self.load_catalog_sources()
-        if not sources:
-            messagebox.showinfo(
-                "Actualizar catálogos",
-                "Crea catalog_sources.json junto a app.py con pares \"archivo.tsv\": \"https://...\" para activar esta función."
-            )
-            return
         logging.info("Actualización de catálogos iniciada: %d fuente(s)", len(sources))
         threading.Thread(target=self._update_catalogs_worker, args=(sources,), daemon=True).start()
+
+    def maybe_update_catalogs_on_start(self):
+        days = int(self.app_config.get("catalog_update_interval_days", 0) or 0)
+        if days <= 0:
+            return
+        state = self.load_catalog_state()
+        last_values = [row.get("updated_at") for row in state.values() if isinstance(row, dict) and row.get("updated_at")]
+        if not last_values:
+            self.update_catalogs_from_sources()
+            return
+        try:
+            last_update = max(datetime.fromisoformat(value) for value in last_values)
+        except ValueError:
+            self.update_catalogs_from_sources()
+            return
+        age_days = (datetime.now() - last_update).days
+        if age_days >= days:
+            self.update_catalogs_from_sources()
 
     def _update_catalogs_worker(self, sources):
         updated = []
@@ -1096,39 +1417,66 @@ class PSNDownloaderApp(ctk.CTk):
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         state = self.load_catalog_state()
 
-        for file_name, url in sources.items():
+        known_files = {
+            file_name: (platform, category)
+            for platform, files in PLATFORM_CATALOGS.items()
+            for category, file_name in files.items()
+        }
+
+        for file_name, source_config in sources.items():
             safe_name = os.path.basename(file_name)
-            if safe_name not in {name for files in PLATFORM_CATALOGS.values() for name in files.values()}:
+            if safe_name not in known_files:
                 failed.append(f"{safe_name}: archivo no reconocido")
                 continue
-            if not str(url).startswith(("http://", "https://")):
-                failed.append(f"{safe_name}: URL no válida")
-                continue
+            urls = []
+            if isinstance(source_config, str):
+                urls.append(source_config)
+            elif isinstance(source_config, dict):
+                urls.append(source_config.get("primary", ""))
+                urls.extend(source_config.get("fallbacks", []))
+            urls = [url for url in urls if isinstance(url, str) and url.startswith(("http://", "https://"))]
 
             target_path = data_path(safe_name)
             backup_path = os.path.join(CATALOG_BACKUP_DIR, f"{timestamp}_{safe_name}")
             temp_path = target_path + ".tmp"
-            try:
-                response = requests.get(url, timeout=30)
-                response.raise_for_status()
-                if os.path.exists(target_path):
-                    shutil.copy2(target_path, backup_path)
-                with open(temp_path, "wb") as f:
-                    f.write(response.content)
-                os.replace(temp_path, target_path)
-                state[safe_name] = {
-                    "source": url,
-                    "updated_at": datetime.now().isoformat(timespec="seconds"),
-                    "backup": backup_path if os.path.exists(backup_path) else "",
-                    "bytes": len(response.content),
-                }
-                updated.append(safe_name)
-                logging.info("Catálogo actualizado: %s desde %s", safe_name, url)
-            except Exception as e:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-                failed.append(f"{safe_name}: {e}")
-                logging.exception("Error actualizando catálogo %s: %s", safe_name, e)
+            platform, category = known_files[safe_name]
+            current_count = len(self.catalog.get(platform, {}).get(category, []))
+            last_error = "sin URLs válidas"
+
+            for url in urls:
+                try:
+                    response = requests.get(url, timeout=30)
+                    response.raise_for_status()
+                    with open(temp_path, "wb") as f:
+                        f.write(response.content)
+                    valid, parsed, reason = self.validate_catalog_file(temp_path, platform, category, current_count)
+                    if not valid:
+                        last_error = f"{url}: {reason}"
+                        os.remove(temp_path)
+                        logging.warning("Catálogo rechazado %s desde %s: %s", safe_name, url, reason)
+                        continue
+                    if os.path.exists(target_path):
+                        shutil.copy2(target_path, backup_path)
+                    os.replace(temp_path, target_path)
+                    state[safe_name] = {
+                        "source": url,
+                        "updated_at": datetime.now().isoformat(timespec="seconds"),
+                        "backup": backup_path if os.path.exists(backup_path) else "",
+                        "bytes": len(response.content),
+                        "rows": parsed,
+                    }
+                    updated.append(safe_name)
+                    self.record_history("catalog_update", platform, category, safe_name, "updated", {"source": url, "rows": parsed})
+                    logging.info("Catálogo actualizado: %s desde %s", safe_name, url)
+                    break
+                except Exception as e:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    last_error = f"{url}: {e}"
+                    logging.exception("Error actualizando catálogo %s: %s", safe_name, e)
+            else:
+                failed.append(f"{safe_name}: {last_error}")
+                self.record_history("catalog_update", platform, category, safe_name, "failed", {"error": last_error})
 
         self.save_catalog_state(state)
         self.after(0, self.load_all_data)
@@ -1141,7 +1489,7 @@ class PSNDownloaderApp(ctk.CTk):
     def open_settings_dialog(self):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Configuración")
-        dialog.geometry("680x360")
+        dialog.geometry("680x500")
         dialog.transient(self)
         dialog.grab_set()
 
@@ -1172,6 +1520,10 @@ class PSNDownloaderApp(ctk.CTk):
         auto_resume_var = tk.BooleanVar(value=bool(self.app_config.get("auto_resume_queue")))
         ctk.CTkCheckBox(frame, text="Reanudar automáticamente la cola al abrir", variable=auto_resume_var).pack(anchor="w", padx=10, pady=(8, 8))
 
+        ctk.CTkLabel(frame, text="Actualizar catálogos cada N días (0 = manual)", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=10, pady=(4, 2))
+        update_days_var = tk.StringVar(value=str(self.app_config.get("catalog_update_interval_days", 0)))
+        ctk.CTkEntry(frame, textvariable=update_days_var).pack(fill="x", padx=10, pady=(0, 8))
+
         source_hint = ctk.CTkLabel(
             frame,
             text=f"Fuentes de catálogos: {CATALOG_SOURCES_PATH}",
@@ -1198,6 +1550,11 @@ class PSNDownloaderApp(ctk.CTk):
 
         ctk.CTkButton(source_row, text="Abrir fuentes", command=open_sources_file).pack(side="left", fill="x", expand=True, padx=(0, 5))
         ctk.CTkButton(source_row, text="Abrir logs", command=lambda: open_path(LOG_DIR)).pack(side="left", fill="x", expand=True, padx=(5, 0))
+        ctk.CTkButton(source_row, text="Importar PKGs", command=self.import_existing_folder).pack(side="left", fill="x", expand=True, padx=(5, 0))
+
+        ctk.CTkLabel(frame, text="Perfil de descarga", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=10, pady=(4, 2))
+        profile_var = tk.StringVar(value=self.app_config.get("download_profile", "Completo seguro"))
+        ctk.CTkComboBox(frame, values=list(DOWNLOAD_PROFILES.keys()), variable=profile_var).pack(fill="x", padx=10, pady=(0, 8))
 
         button_bar = ctk.CTkFrame(dialog)
         button_bar.pack(fill="x", padx=15, pady=(0, 15))
@@ -1207,6 +1564,7 @@ class PSNDownloaderApp(ctk.CTk):
             try:
                 max_active = max(1, min(8, int(active_var.get())))
                 threads = max(1, min(32, int(threads_var.get())))
+                update_days = max(0, int(update_days_var.get()))
             except ValueError:
                 messagebox.showerror("Configuración", "Los valores numéricos no son válidos.")
                 return
@@ -1219,6 +1577,8 @@ class PSNDownloaderApp(ctk.CTk):
                 "max_active_downloads": max_active,
                 "threads_per_download": threads,
                 "auto_resume_queue": bool(auto_resume_var.get()),
+                "catalog_update_interval_days": update_days,
+                "download_profile": profile_var.get(),
             })
             self.max_active_downloads = max_active
             self.threads_per_download = threads
@@ -1403,13 +1763,16 @@ class PSNDownloaderApp(ctk.CTk):
         return related
 
     def item_selected_by_default(self, item, category, related):
-        if category == "Juegos":
-            return True
-        if item.match_type != "exact":
+        profile = DOWNLOAD_PROFILES.get(self.app_config.get("download_profile", "Completo seguro"), DOWNLOAD_PROFILES["Completo seguro"])
+        if profile.get("require_sha256") and not valid_sha256(item.sha256):
             return False
+        if category == "Juegos":
+            return profile.get("base", True)
+        if item.match_type != "exact":
+            return profile.get("suggested", False)
         if category == "Updates":
-            return self.update_is_latest(item, related["Updates"])
-        return True
+            return True if not profile.get("latest_update", True) else self.update_is_latest(item, related["Updates"])
+        return profile.get("exact_extras", True)
 
     def item_already_present(self, item, entries):
         return any(
@@ -1580,6 +1943,147 @@ class PSNDownloaderApp(ctk.CTk):
         ctk.CTkButton(button_bar, text="🧩 Completar faltantes", command=complete_missing).pack(side="left", padx=5)
         ctk.CTkButton(button_bar, text="📂 Abrir carpeta", command=open_folder).pack(side="left", padx=5)
         ctk.CTkButton(button_bar, text="Cerrar", fg_color="#555555", command=dialog.destroy).pack(side="right", padx=5)
+
+    def global_missing_groups(self):
+        proposals = []
+        for base_item in self.downloaded_base_items_for_platform(self.current_platform):
+            game_key, missing = self.missing_related_content(base_item)
+            if any(missing.values()):
+                proposals.append((base_item, game_key, missing))
+        return proposals
+
+    def open_global_missing_dialog(self):
+        proposals = self.global_missing_groups()
+        if not proposals:
+            messagebox.showinfo("Faltantes", "No hay contenido pendiente detectado en esta plataforma.")
+            return
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(f"Faltantes - {self.current_platform}")
+        dialog.geometry("920x560")
+        dialog.transient(self)
+
+        columns = ("game", "updates", "dlcs", "themes", "avatars")
+        tree = ttk.Treeview(dialog, columns=columns, show="headings", selectmode="extended")
+        headings = {"game": "Juego", "updates": "Updates", "dlcs": "DLCs", "themes": "Temas", "avatars": "Avatares"}
+        widths = {"game": 360, "updates": 120, "dlcs": 120, "themes": 120, "avatars": 120}
+        for col in columns:
+            tree.heading(col, text=headings[col])
+            tree.column(col, width=widths[col], anchor="w" if col == "game" else "center")
+        tree.pack(fill="both", expand=True, padx=15, pady=15)
+
+        proposal_by_iid = {}
+        for index, (base_item, game_key, missing) in enumerate(proposals):
+            iid = str(index)
+            proposal_by_iid[iid] = (base_item, game_key, missing)
+            tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    base_item.name,
+                    len(missing.get("Updates", [])),
+                    len(missing.get("DLCs", [])),
+                    len(missing.get("Temas", [])),
+                    len(missing.get("Avatares", [])),
+                )
+            )
+
+        button_bar = ctk.CTkFrame(dialog)
+        button_bar.pack(fill="x", padx=15, pady=(0, 15))
+
+        def complete_selected():
+            selected = tree.selection()
+            chosen = [proposal_by_iid[iid] for iid in selected] if selected else proposals
+            dialog.destroy()
+            self.open_related_selection_dialog(
+                chosen,
+                title=f"Descargar faltantes - {self.current_platform}",
+                header_text=f"Faltantes seleccionados: {len(chosen)} juego(s)",
+                include_base=False
+            )
+
+        ctk.CTkButton(button_bar, text="Descargar seleccionados", command=complete_selected).pack(side="left", padx=5)
+        ctk.CTkButton(button_bar, text="Cerrar", fg_color="#555555", command=dialog.destroy).pack(side="right", padx=5)
+
+    def verify_library_integrity(self):
+        threading.Thread(target=self._verify_library_integrity_worker, daemon=True).start()
+
+    def _verify_library_integrity_worker(self):
+        checked = 0
+        corrupt = 0
+        entries = self.merged_download_entries()
+        for key, entry in entries.items():
+            if entry.get("platform", "PS3") != self.current_platform:
+                continue
+            path = entry.get("path", "")
+            sha = entry.get("sha256", "")
+            if not path or not os.path.exists(path) or not valid_sha256(sha):
+                continue
+            checked += 1
+            actual = calculate_sha256(path)
+            manifest_entry = self.download_manifest.get(key)
+            if actual.lower() == sha.lower():
+                if manifest_entry:
+                    manifest_entry.update({"status": "complete", "integrity": "verified", "actual_sha256": actual, "verified_at": datetime.now().isoformat(timespec="seconds")})
+            else:
+                corrupt += 1
+                if manifest_entry:
+                    manifest_entry.update({"status": "corrupt", "integrity": "corrupt", "actual_sha256": actual, "verified_at": datetime.now().isoformat(timespec="seconds")})
+        self.save_download_manifest()
+        self.record_history("verify_library", self.current_platform, "", "Biblioteca", "complete", {"checked": checked, "corrupt": corrupt})
+        self.after(0, self.refresh_downloads_view)
+        self.after(0, lambda: messagebox.showinfo("Verificar biblioteca", f"Comprobados: {checked}\nCorruptos: {corrupt}"))
+
+    def repair_corrupt_downloads(self):
+        repaired = 0
+        entries = self.merged_download_entries()
+        for key, entry in entries.items():
+            if entry.get("platform", "PS3") != self.current_platform:
+                continue
+            if entry.get("status") != "corrupt" and entry.get("integrity") != "corrupt":
+                continue
+            item = self.content_by_url.get(entry.get("url", ""))
+            if not item:
+                continue
+            base_item = next((game for game in self.catalog[self.current_platform]["Juegos"] if game.title_id == entry.get("base_title_id")), item)
+            path = entry.get("path") or os.path.join(DOWNLOADS_DIR, item.platform, category_folder(item.category), item_filename(item))
+            self.register_manifest_entry(base_item, item, entry.get("game_key", item.name), path, "queued")
+            self.enqueue_download(item.url, path, item.name, item.category, item.platform, base_item, item, entry.get("game_key", item.name))
+            repaired += 1
+        messagebox.showinfo("Reparar corruptos", f"Reenviados a la cola: {repaired}")
+
+    def import_existing_folder(self):
+        folder = filedialog.askdirectory(title="Importar carpeta con PKGs")
+        if not folder:
+            return
+        imported = 0
+        unmatched = 0
+        all_items = [
+            item
+            for categories in self.catalog[self.current_platform].values()
+            for item in categories
+        ]
+        by_filename = {item_filename(item).lower(): item for item in all_items}
+        for root_dir, _dirs, files in os.walk(folder):
+            for filename in files:
+                if not filename.lower().endswith(".pkg"):
+                    continue
+                item = by_filename.get(filename.lower())
+                if not item:
+                    unmatched += 1
+                    continue
+                game_key = f"{sanitize_filename(item.name)} [{item.title_id}]"
+                dest_dir = os.path.join(DOWNLOADS_DIR, item.platform, game_key, category_folder(item.category))
+                os.makedirs(dest_dir, exist_ok=True)
+                src_path = os.path.join(root_dir, filename)
+                dest_path = unique_path(os.path.join(dest_dir, filename))
+                shutil.copy2(src_path, dest_path)
+                self.register_manifest_entry(item, item, game_key, dest_path, "complete")
+                imported += 1
+        self.record_history("import_folder", self.current_platform, "", folder, "complete", {"imported": imported, "unmatched": unmatched})
+        self.refresh_downloads_view()
+        messagebox.showinfo("Importar carpeta", f"Importados: {imported}\nSin identificar: {unmatched}")
 
     def start_complete_download_dialog(self, tree):
         selected_items = tree.selection()
@@ -2017,11 +2521,12 @@ class PSNDownloaderApp(ctk.CTk):
             "platform": self.current_platform,
             "library": self.library_report_rows(),
             "queue": self.queue_report_rows(),
+            "history": self.history_report_rows(),
         }
 
         try:
             if path.lower().endswith(".csv"):
-                section = "queue" if active_tab == "Cola" else "library"
+                section = "queue" if active_tab == "Cola" else "history" if active_tab == "Historial" else "library"
                 rows = data[section]
                 with open(path, "w", newline="", encoding="utf-8") as f:
                     if rows:
@@ -2103,10 +2608,12 @@ class PSNDownloaderApp(ctk.CTk):
         if actual_sha256.lower() == item.sha256.lower():
             logging.info("SHA256 verificado: %s", path)
             self.update_manifest_integrity(base_item, item, game_key, path, "complete", "verified", actual_sha256)
+            self.record_history("verify_file", item.platform, item.category, item.name, "verified", {"path": path})
             return "complete"
 
         logging.warning("SHA256 corrupto: %s esperado=%s real=%s", path, item.sha256, actual_sha256)
         self.update_manifest_integrity(base_item, item, game_key, path, "corrupt", "corrupt", actual_sha256)
+        self.record_history("verify_file", item.platform, item.category, item.name, "corrupt", {"path": path})
         return "corrupt"
 
     def scan_downloads_folder(self):
@@ -2466,10 +2973,12 @@ class PSNDownloaderApp(ctk.CTk):
                     return
             self.complete_task(task)
             logging.info("Descarga completada: %s", dest_path)
+            self.record_history("download", task.platform if task else "", task.category if task else "", title, "complete", {"path": dest_path})
 
         except DownloadCancelled as e:
             self.fail_task(task, e)
             logging.info("Descarga cancelada: %s", dest_path)
+            self.record_history("download", task.platform if task else "", task.category if task else "", title, "cancelled", {"path": dest_path})
             self.status_label.configure(text=f"Cancelado: {os.path.basename(dest_path)}")
             if base_item and manifest_item and game_key:
                 self.register_manifest_entry(base_item, manifest_item, game_key, dest_path, "cancelled")
@@ -2478,6 +2987,7 @@ class PSNDownloaderApp(ctk.CTk):
             self.status_label.configure(text="❌ Error en la descarga")
             self.fail_task(task, e)
             logging.exception("Error descargando %s: %s", title, e)
+            self.record_history("download", task.platform if task else "", task.category if task else "", title, "error", {"path": dest_path, "error": str(e)})
             if base_item and manifest_item and game_key:
                 self.register_manifest_entry(base_item, manifest_item, game_key, dest_path, "error")
                 self.refresh_downloads_view()

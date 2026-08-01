@@ -1,20 +1,78 @@
 {
-  "PS3_GAMES.tsv": "https://example.com/PS3_GAMES.tsv",
-  "PS3_UPDATES.tsv": "https://example.com/PS3_UPDATES.tsv",
-  "PS3_DEMOS.tsv": "https://example.com/PS3_DEMOS.tsv",
-  "PS3_THEMES.tsv": "https://example.com/PS3_THEMES.tsv",
-  "PS3_AVATARS.tsv": "https://example.com/PS3_AVATARS.tsv",
-  "PS3_DLCS.tsv": "https://example.com/PS3_DLCS.tsv",
-  "PSP_GAMES.tsv": "https://example.com/PSP_GAMES.tsv",
-  "PSP_UPDATES.tsv": "https://example.com/PSP_UPDATES.tsv",
-  "PSP_DEMOS.tsv": "https://example.com/PSP_DEMOS.tsv",
-  "PSP_THEMES.tsv": "https://example.com/PSP_THEMES.tsv",
-  "PSP_DLCS.tsv": "https://example.com/PSP_DLCS.tsv",
-  "PSV_GAMES.tsv": "https://example.com/PSV_GAMES.tsv",
-  "PSV_UPDATES.tsv": "https://example.com/PSV_UPDATES.tsv",
-  "PSV_DEMOS.tsv": "https://example.com/PSV_DEMOS.tsv",
-  "PSV_THEMES.tsv": "https://example.com/PSV_THEMES.tsv",
-  "PSV_DLCS.tsv": "https://example.com/PSV_DLCS.tsv",
-  "PSX_GAMES.tsv": "https://example.com/PSX_GAMES.tsv",
-  "PSM_GAMES.tsv": "https://example.com/PSM_GAMES.tsv"
+  "primary_base_url": "https://nopaystation.com/tsv",
+  "fallback_base_urls": [],
+  "sources": {
+    "PS3_GAMES.tsv": {
+      "primary": "https://nopaystation.com/tsv/PS3_GAMES.tsv",
+      "fallbacks": []
+    },
+    "PS3_UPDATES.tsv": {
+      "primary": "https://nopaystation.com/tsv/PS3_UPDATES.tsv",
+      "fallbacks": []
+    },
+    "PS3_DEMOS.tsv": {
+      "primary": "https://nopaystation.com/tsv/PS3_DEMOS.tsv",
+      "fallbacks": []
+    },
+    "PS3_THEMES.tsv": {
+      "primary": "https://nopaystation.com/tsv/PS3_THEMES.tsv",
+      "fallbacks": []
+    },
+    "PS3_AVATARS.tsv": {
+      "primary": "https://nopaystation.com/tsv/PS3_AVATARS.tsv",
+      "fallbacks": []
+    },
+    "PS3_DLCS.tsv": {
+      "primary": "https://nopaystation.com/tsv/PS3_DLCS.tsv",
+      "fallbacks": []
+    },
+    "PSP_GAMES.tsv": {
+      "primary": "https://nopaystation.com/tsv/PSP_GAMES.tsv",
+      "fallbacks": []
+    },
+    "PSP_UPDATES.tsv": {
+      "primary": "https://nopaystation.com/tsv/PSP_UPDATES.tsv",
+      "fallbacks": []
+    },
+    "PSP_DEMOS.tsv": {
+      "primary": "https://nopaystation.com/tsv/PSP_DEMOS.tsv",
+      "fallbacks": []
+    },
+    "PSP_THEMES.tsv": {
+      "primary": "https://nopaystation.com/tsv/PSP_THEMES.tsv",
+      "fallbacks": []
+    },
+    "PSP_DLCS.tsv": {
+      "primary": "https://nopaystation.com/tsv/PSP_DLCS.tsv",
+      "fallbacks": []
+    },
+    "PSV_GAMES.tsv": {
+      "primary": "https://nopaystation.com/tsv/PSV_GAMES.tsv",
+      "fallbacks": []
+    },
+    "PSV_UPDATES.tsv": {
+      "primary": "https://nopaystation.com/tsv/PSV_UPDATES.tsv",
+      "fallbacks": []
+    },
+    "PSV_DEMOS.tsv": {
+      "primary": "https://nopaystation.com/tsv/PSV_DEMOS.tsv",
+      "fallbacks": []
+    },
+    "PSV_THEMES.tsv": {
+      "primary": "https://nopaystation.com/tsv/PSV_THEMES.tsv",
+      "fallbacks": []
+    },
+    "PSV_DLCS.tsv": {
+      "primary": "https://nopaystation.com/tsv/PSV_DLCS.tsv",
+      "fallbacks": []
+    },
+    "PSX_GAMES.tsv": {
+      "primary": "https://nopaystation.com/tsv/PSX_GAMES.tsv",
+      "fallbacks": []
+    },
+    "PSM_GAMES.tsv": {
+      "primary": "https://nopaystation.com/tsv/PSM_GAMES.tsv",
+      "fallbacks": []
+    }
+  }
 }
