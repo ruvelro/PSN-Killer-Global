@@ -84,6 +84,7 @@ CATALOG_DB_PATH = os.path.join(DATA_DIR, "catalog.sqlite3")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 LOG_PATH = os.path.join(LOG_DIR, "app.log")
 APP_VERSION = "0.2.0"
+CATALOG_STATE_META_KEY = "_meta"
 DATABASE_TSV_BASE_URL = "https://raw.githubusercontent.com/ruvelro/PSN-Killer-Database/main/data"
 NPS_TSV_BASE_URL = "https://nopaystation.com/tsv"
 VITAWIKI_TSV_BASE_URL = "https://vitawiki.xyz/free"
@@ -647,7 +648,7 @@ class PSNDownloaderApp(ctk.CTk):
 
     def start_initial_catalog_load(self):
         self.catalog_loading = True
-        self.set_busy_state("Actualizando base de datos local, espera...")
+        self.set_busy_state("Cargando base de datos local, espera...")
         threading.Thread(target=self._initial_catalog_load_worker, daemon=True).start()
 
     def _initial_catalog_load_worker(self):
@@ -911,7 +912,10 @@ class PSNDownloaderApp(ctk.CTk):
 
     def _build_downloads_view(self, parent):
         columns = ("game", "base", "updates", "dlcs", "themes", "avatars", "files", "status", "folder")
-        self.downloads_tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
+        table_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        table_frame.pack(side="top", fill="both", expand=True, padx=5, pady=5)
+
+        self.downloads_tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
 
         headings = {
             "game": "Juego",
@@ -939,11 +943,11 @@ class PSNDownloaderApp(ctk.CTk):
             self.downloads_tree.heading(col, text=headings[col])
             self.downloads_tree.column(col, width=widths[col], anchor="w" if col in ["game", "folder"] else "center")
 
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.downloads_tree.yview)
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.downloads_tree.yview)
         self.downloads_tree.configure(yscrollcommand=scrollbar.set)
         self.downloads_tree.bind("<Double-1>", lambda event: self.open_selected_library_details())
-        self.downloads_tree.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        scrollbar.pack(side="right", fill="y", pady=5)
+        self.downloads_tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
         btn_frame.pack(side="bottom", fill="x", padx=5, pady=5)
@@ -986,7 +990,10 @@ class PSNDownloaderApp(ctk.CTk):
 
     def _build_queue_view(self, parent):
         columns = ("id", "platform", "category", "title", "status", "progress", "speed", "folder")
-        self.queue_tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="extended")
+        table_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        table_frame.pack(side="top", fill="both", expand=True, padx=5, pady=5)
+
+        self.queue_tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="extended")
 
         headings = {
             "id": "ID",
@@ -1012,10 +1019,10 @@ class PSNDownloaderApp(ctk.CTk):
             self.queue_tree.heading(col, text=headings[col])
             self.queue_tree.column(col, width=widths[col], anchor="w" if col in ["title", "folder"] else "center")
 
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.queue_tree.yview)
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.queue_tree.yview)
         self.queue_tree.configure(yscrollcommand=scrollbar.set)
-        self.queue_tree.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        scrollbar.pack(side="right", fill="y", pady=5)
+        self.queue_tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
         btn_frame.pack(side="bottom", fill="x", padx=5, pady=5)
@@ -1030,7 +1037,10 @@ class PSNDownloaderApp(ctk.CTk):
 
     def _build_history_view(self, parent):
         columns = ("created_at", "action", "platform", "name", "status", "details")
-        self.history_tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
+        table_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        table_frame.pack(side="top", fill="both", expand=True, padx=5, pady=5)
+
+        self.history_tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
         headings = {
             "created_at": "Fecha",
             "action": "Acción",
@@ -1043,10 +1053,10 @@ class PSNDownloaderApp(ctk.CTk):
         for col in columns:
             self.history_tree.heading(col, text=headings[col])
             self.history_tree.column(col, width=widths[col], anchor="w" if col in {"name", "details"} else "center")
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.history_tree.yview)
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.history_tree.yview)
         self.history_tree.configure(yscrollcommand=scrollbar.set)
-        self.history_tree.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        scrollbar.pack(side="right", fill="y", pady=5)
+        self.history_tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
         btn_frame.pack(side="bottom", fill="x", padx=5, pady=5)
@@ -1551,7 +1561,23 @@ class PSNDownloaderApp(ctk.CTk):
         if days <= 0:
             return
         state = self.load_catalog_state()
-        last_values = [row.get("updated_at") for row in state.values() if isinstance(row, dict) and row.get("updated_at")]
+        meta = state.get(CATALOG_STATE_META_KEY, {}) if isinstance(state.get(CATALOG_STATE_META_KEY), dict) else {}
+        last_check_value = meta.get("last_catalog_check_at")
+        if last_check_value:
+            try:
+                last_check = datetime.fromisoformat(last_check_value)
+                age_days = (datetime.now() - last_check).days
+                if age_days < days:
+                    logging.info("Auto-actualización omitida: última comprobación hace %d día(s)", age_days)
+                    return
+            except ValueError:
+                logging.warning("Fecha last_catalog_check_at inválida: %s", last_check_value)
+
+        last_values = [
+            row.get("updated_at")
+            for key, row in state.items()
+            if key != CATALOG_STATE_META_KEY and isinstance(row, dict) and row.get("updated_at")
+        ]
         if not last_values:
             self.update_catalogs_from_sources()
             return
@@ -1563,6 +1589,10 @@ class PSNDownloaderApp(ctk.CTk):
         age_days = (datetime.now() - last_update).days
         if age_days >= days:
             self.update_catalogs_from_sources()
+        else:
+            meta["last_catalog_check_at"] = last_update.isoformat(timespec="seconds")
+            state[CATALOG_STATE_META_KEY] = meta
+            self.save_catalog_state(state)
 
     def _update_catalogs_worker(self, sources):
         updated = []
@@ -1587,7 +1617,10 @@ class PSNDownloaderApp(ctk.CTk):
             elif isinstance(source_config, dict):
                 urls.append(source_config.get("primary", ""))
                 urls.extend(source_config.get("fallbacks", []))
-            urls = [url for url in urls if isinstance(url, str) and url.startswith(("http://", "https://"))]
+            urls = list(dict.fromkeys(
+                url for url in urls
+                if isinstance(url, str) and url.startswith(("http://", "https://"))
+            ))
 
             target_path = data_path(safe_name)
             backup_path = os.path.join(CATALOG_BACKUP_DIR, f"{timestamp}_{safe_name}")
@@ -1631,6 +1664,12 @@ class PSNDownloaderApp(ctk.CTk):
                 failed.append(f"{safe_name}: {last_error}")
                 self.record_history("catalog_update", platform, category, safe_name, "failed", {"error": last_error})
 
+        meta = state.get(CATALOG_STATE_META_KEY, {}) if isinstance(state.get(CATALOG_STATE_META_KEY), dict) else {}
+        now_value = datetime.now().isoformat(timespec="seconds")
+        meta["last_catalog_check_at"] = now_value
+        if updated:
+            meta["last_successful_catalog_update_at"] = now_value
+        state[CATALOG_STATE_META_KEY] = meta
         self.save_catalog_state(state)
         self.load_all_data(populate=False)
         message = f"Actualizados: {len(updated)}"
