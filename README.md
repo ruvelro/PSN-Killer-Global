@@ -1,6 +1,6 @@
-# 🎮 PS3 PSN Killer
+# 🎮 PSN Killer Global
 
-Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTkinter** diseñada para buscar, filtrar y descargar contenido oficial de PS3 de forma masiva y a alta velocidad (juegos, actualizaciones, demos, temas, avatares, DLCs y licencias RAP).
+Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTkinter** diseñada para buscar, filtrar y descargar contenido oficial de PlayStation de forma masiva y a alta velocidad (juegos, actualizaciones, demos, temas, avatares, DLCs y licencias).
 
 > **💡 Nota importante:** Ideal para respaldar y preservar todo tu contenido digital ante un hipotético cierre de los servidores oficiales de la tienda de PS3. ¡Guarda tus juegos antes de que sea tarde! Xd
 
@@ -15,8 +15,9 @@ Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTki
 ## ✨ Características Principales
 
 * **🚀 Motor de Descarga Turbo Multihilo:** Soporta hasta 16 hilos concurrentes con peticiones HTTP por rangos (`Range`) para exprimir al máximo tu conexión de fibra óptica.
-* **🔍 Búsqueda y Filtros Avanzados:** Filtra por nombre, Title ID o región (`US`, `EU`, `JP`, `ASIA`) al instante.
-* **📂 Organización Automática:** Clasifica y guarda cada tipo de contenido en su carpeta correspondiente (`Juegos_PS3`, `PS2_Classics`, `Actualizaciones_PS3`, etc.).
+* **🔍 Búsqueda y Filtros Avanzados:** Filtra por plataforma, nombre, Title ID o región (`US`, `EU`, `JP`, `ASIA`) al instante.
+* **📚 Catálogos Multi-Plataforma:** Soporta PS3, PSP, PS Vita, PSX y PSM desde archivos TSV en la carpeta `data/`.
+* **📂 Organización Automática:** Clasifica y guarda cada tipo de contenido en `Descargas/` por plataforma y tipo de contenido.
 * **🔑 Soporte para Licencias:** Botón de acceso directo para descargar paquetes de licencias RAP universales.
 * **🎨 Interfaz Oscura Minimalista:** Desarrollada con CustomTkinter para una experiencia visual limpia y moderna.
 * **📦 Autoinstalación de Dependencias:** El script verifica e instala automáticamente las librerías necesarias (`customtkinter`, `requests`, `beautifulsoup4`) al primer inicio.
@@ -27,7 +28,7 @@ Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTki
 
 La aplicación opera mediante los siguientes componentes lógicos:
 
-1. **Lectura de Bases de Datos Locales:** El script procesa archivos en formato TSV (`PS3_GAMES.tsv`, `PS3_UPDATES.tsv`, etc.) que contienen los catálogos oficiales con los metadatos y las URLs directas de los servidores.
+1. **Lectura de Bases de Datos Locales:** El script procesa archivos en formato TSV dentro de `data/` (`PS3_GAMES.tsv`, `PSP_GAMES.tsv`, `PSV_UPDATES.tsv`, etc.) que contienen los catálogos oficiales con los metadatos y las URLs directas de los servidores.
 2. **Detección de Regiones:** Analiza automáticamente el prefijo del *Title ID* (por ejemplo, `BLUS`, `BLES`, `NPUB`) para clasificar la región del juego de forma inteligente.
 3. **Segmentación de Archivos (Multihilo):** 
    * Primero realiza una petición HTTP `HEAD` para comprobar el tamaño exacto del archivo `.pkg` y si el servidor admite descargas por rangos (`Accept-Ranges`).
@@ -64,6 +65,8 @@ La aplicación opera mediante los siguientes componentes lógicos:
    ```
 
 Los lanzadores comprueban Python, crean `.venv`, instalan `requirements.txt` y arrancan `app.py`.
+
+Los catálogos TSV deben vivir en la carpeta `data/`. La raíz del proyecto queda reservada para la app, lanzadores, documentación y assets principales.
 
 ### Uso manual
 

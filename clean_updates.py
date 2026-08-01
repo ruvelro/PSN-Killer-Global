@@ -95,4 +95,8 @@ def clean_and_convert_updates(input_path, output_path):
     print(f"📄 Guardado en: '{output_path}'")
 
 if __name__ == "__main__":
-    clean_and_convert_updates("PS3_UPDATES.txt", "PS3_UPDATES.tsv")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    clean_and_convert_updates(
+        os.path.join(base_dir, "PS3_UPDATES.txt"),
+        os.path.join(base_dir, "data", "PS3_UPDATES.tsv")
+    )

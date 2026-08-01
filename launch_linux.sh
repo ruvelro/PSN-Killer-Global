@@ -42,5 +42,5 @@ echo "Instalando dependencias..."
 ".venv/bin/python" -m pip install --upgrade pip
 ".venv/bin/python" -m pip install -r requirements.txt
 
-echo "Lanzando PS3 PSN KILLER..."
+echo "Lanzando PSN Killer Global..."
 exec ".venv/bin/python" app.py
