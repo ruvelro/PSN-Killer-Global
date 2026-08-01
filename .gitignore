@@ -7,6 +7,9 @@ downloads_manifest.json
 download_queue.json
 app_config.json
 catalog_sources.json
+data/*.tsv
+data/pending/*.tsv
+!data/.gitkeep
 data/catalog_state.json
 data/catalog.sqlite3
 data/catalog.sqlite3-*

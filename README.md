@@ -80,9 +80,11 @@ La aplicación opera mediante los siguientes componentes lógicos:
 
 Los lanzadores comprueban Python, crean `.venv`, instalan `requirements.txt` y arrancan `app.py`.
 
-Los catálogos TSV deben vivir en la carpeta `data/`. La raíz del proyecto queda reservada para la app, lanzadores, documentación y assets principales.
+Los catálogos TSV se guardan en la carpeta `data/` como caché local y ya no se versionan en este repo. La raíz del proyecto queda reservada para la app, lanzadores, documentación y assets principales.
 
-Por defecto, el actualizador descarga desde `https://nopaystation.com/tsv/<nombre.tsv>`. Para cambiar la fuente global o añadir mirrors, copia `catalog_sources.example.json` a `catalog_sources.json` y ajusta `primary_base_url`, `fallback_base_urls` o las fuentes por archivo. Cada actualización valida que el TSV tenga filas útiles antes de reemplazar el anterior; si la fuente nueva viene vacía o rota, conserva el catálogo local y prueba los fallbacks configurados. Los backups se guardan en `data/backups/` y el estado en `data/catalog_state.json`.
+Por defecto, el actualizador usa como fuente primaria `https://raw.githubusercontent.com/ruvelro/PSN-Killer-Database/main/data/<nombre.tsv>`, con NoPayStation como secundaria y VitaWiki como mirror adicional. Este orden protege catálogos curados como `PS3_UPDATES.tsv`, que actualmente es mucho más completo en la base propia que en la fuente pública de NoPayStation.
+
+Para cambiar la fuente global o añadir mirrors, copia `catalog_sources.example.json` a `catalog_sources.json` y ajusta `primary_base_url`, `fallback_base_urls` o las fuentes por archivo. Cada actualización valida que el TSV tenga filas útiles antes de reemplazar el anterior; si la fuente nueva viene vacía o rota, conserva el catálogo local y prueba los fallbacks configurados. Los backups se guardan en `data/backups/` y el estado en `data/catalog_state.json`.
 
 La configuración local se guarda en `app_config.json`, la cola en `download_queue.json`, la caché SQLite en `data/catalog.sqlite3` y los logs técnicos en `logs/app.log`. Estos archivos no se versionan.
 

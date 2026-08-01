@@ -83,7 +83,9 @@ CATALOG_BACKUP_DIR = os.path.join(DATA_DIR, "backups")
 CATALOG_DB_PATH = os.path.join(DATA_DIR, "catalog.sqlite3")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 LOG_PATH = os.path.join(LOG_DIR, "app.log")
+DATABASE_TSV_BASE_URL = "https://raw.githubusercontent.com/ruvelro/PSN-Killer-Database/main/data"
 NPS_TSV_BASE_URL = "https://nopaystation.com/tsv"
+VITAWIKI_TSV_BASE_URL = "https://vitawiki.xyz/free"
 
 # URL directa al pack de licencias
 GITHUB_RAP_URL = "https://github.com/TheWizWikii/PS3-Stuff-Repository/releases/download/3/License_Pack_31.153.pkg"
@@ -307,9 +309,9 @@ DEFAULT_APP_CONFIG = {
     "max_active_downloads": 2,
     "threads_per_download": 16,
     "auto_resume_queue": False,
-    "catalog_primary_base_url": NPS_TSV_BASE_URL,
-    "catalog_fallback_base_urls": [],
-    "catalog_update_interval_days": 0,
+    "catalog_primary_base_url": DATABASE_TSV_BASE_URL,
+    "catalog_fallback_base_urls": [NPS_TSV_BASE_URL, VITAWIKI_TSV_BASE_URL],
+    "catalog_update_interval_days": 7,
     "download_profile": "Completo seguro",
 }
 MAX_ACTIVE_DOWNLOADS = DEFAULT_APP_CONFIG["max_active_downloads"]
@@ -524,6 +526,11 @@ class PSNDownloaderApp(ctk.CTk):
                     saved = json.load(f)
                 if isinstance(saved, dict):
                     config.update(saved)
+                    old_primary = saved.get("catalog_primary_base_url")
+                    old_fallbacks = saved.get("catalog_fallback_base_urls", [])
+                    if old_primary == NPS_TSV_BASE_URL and not old_fallbacks:
+                        config["catalog_primary_base_url"] = DATABASE_TSV_BASE_URL
+                        config["catalog_fallback_base_urls"] = [NPS_TSV_BASE_URL, VITAWIKI_TSV_BASE_URL]
             except (json.JSONDecodeError, OSError) as e:
                 logging.warning("No se pudo leer app_config.json: %s", e)
         return config
@@ -1304,11 +1311,18 @@ class PSNDownloaderApp(ctk.CTk):
         self.populate_trees()
 
     def load_catalog_sources(self):
+        def build_source_url(base_url, file_name):
+            source_name = "PS1_GAMES.tsv" if "vitawiki.xyz" in base_url.lower() and file_name == "PSX_GAMES.tsv" else file_name
+            return f"{base_url.rstrip('/')}/{source_name}"
+
         default_sources = {
             file_name: {
-                "primary": f"{self.app_config.get('catalog_primary_base_url', NPS_TSV_BASE_URL).rstrip('/')}/{file_name}",
+                "primary": build_source_url(
+                    self.app_config.get("catalog_primary_base_url", DATABASE_TSV_BASE_URL),
+                    file_name,
+                ),
                 "fallbacks": [
-                    f"{base.rstrip('/')}/{file_name}"
+                    build_source_url(base, file_name)
                     for base in self.app_config.get("catalog_fallback_base_urls", [])
                     if isinstance(base, str) and base.strip()
                 ],
@@ -1327,11 +1341,11 @@ class PSNDownloaderApp(ctk.CTk):
             fallback_base_urls = data.get("fallback_base_urls")
             if isinstance(primary_base_url, str) and primary_base_url.strip():
                 for file_name in default_sources:
-                    default_sources[file_name]["primary"] = f"{primary_base_url.rstrip('/')}/{file_name}"
+                    default_sources[file_name]["primary"] = build_source_url(primary_base_url, file_name)
             if isinstance(fallback_base_urls, list):
                 for file_name in default_sources:
                     default_sources[file_name]["fallbacks"] = [
-                        f"{base.rstrip('/')}/{file_name}"
+                        build_source_url(base, file_name)
                         for base in fallback_base_urls
                         if isinstance(base, str) and base.strip()
                     ]
