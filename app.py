@@ -505,16 +505,15 @@ class PSNDownloaderApp(ctk.CTk):
         self.download_task_seq = 0
         self.active_downloads = 0
         self.running_task_ids = set()
+        self.catalog_loading = False
+        self.catalog_update_running = False
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.create_ui()
-        self.load_all_data()
         self.load_queue_state()
         self.refresh_downloads_view()
         self.refresh_queue_view()
-        if self.app_config.get("auto_resume_queue"):
-            self.schedule_downloads()
-        self.maybe_update_catalogs_on_start()
+        self.after(100, self.start_initial_catalog_load)
 
     def setup_dark_theme(self):
         """ Configura el estilo oscuro minimalista para los Treeview de Tkinter """
@@ -633,6 +632,47 @@ class PSNDownloaderApp(ctk.CTk):
         except OSError as e:
             logging.exception("No se pudo guardar la cola al cerrar: %s", e)
         self.destroy()
+
+    def set_busy_state(self, message):
+        self.status_label.configure(text=message)
+        self.count_label.configure(text=message)
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_bar.start()
+
+    def clear_busy_state(self, message="Estado: Listo"):
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(0)
+        self.status_label.configure(text=message)
+
+    def start_initial_catalog_load(self):
+        self.catalog_loading = True
+        self.set_busy_state("Actualizando base de datos local, espera...")
+        threading.Thread(target=self._initial_catalog_load_worker, daemon=True).start()
+
+    def _initial_catalog_load_worker(self):
+        try:
+            self.load_all_data(populate=False)
+            self.after(0, self.finish_initial_catalog_load)
+        except Exception as e:
+            logging.exception("Error cargando catálogos al iniciar: %s", e)
+            self.after(0, lambda: self.fail_initial_catalog_load(e))
+
+    def finish_initial_catalog_load(self):
+        self.catalog_loading = False
+        self.data_store = self.catalog[self.current_platform]
+        self.populate_trees()
+        self.refresh_downloads_view()
+        self.refresh_queue_view()
+        self.clear_busy_state("Estado: Listo")
+        if self.app_config.get("auto_resume_queue"):
+            self.schedule_downloads()
+        self.maybe_update_catalogs_on_start()
+
+    def fail_initial_catalog_load(self, error):
+        self.catalog_loading = False
+        self.clear_busy_state("Error cargando catálogos")
+        messagebox.showerror("Catálogos", f"No se pudo cargar la base de datos local:\n{error}")
 
     def create_ui(self):
         top_frame = ctk.CTkFrame(self, height=50)
@@ -932,6 +972,15 @@ class PSNDownloaderApp(ctk.CTk):
         repair_btn = ctk.CTkButton(btn_frame, text="🛠️ Reparar corruptos", command=self.repair_corrupt_downloads)
         repair_btn.pack(side="left", fill="x", expand=True, padx=4)
 
+        clear_btn = ctk.CTkButton(
+            btn_frame,
+            text="🧹 Limpiar descargas",
+            fg_color="#7d2d2d",
+            hover_color="#662323",
+            command=self.clear_downloads_for_current_platform
+        )
+        clear_btn.pack(side="left", fill="x", expand=True, padx=4)
+
         open_btn = ctk.CTkButton(btn_frame, text="📂 Abrir carpeta Descargas", command=self.open_downloads_folder)
         open_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
@@ -975,6 +1024,7 @@ class PSNDownloaderApp(ctk.CTk):
         ctk.CTkButton(btn_frame, text="▶️ Reanudar", command=self.resume_selected_tasks).pack(side="left", fill="x", expand=True, padx=4)
         ctk.CTkButton(btn_frame, text="🔁 Reintentar", command=self.retry_selected_tasks).pack(side="left", fill="x", expand=True, padx=4)
         ctk.CTkButton(btn_frame, text="✖️ Cancelar", fg_color="#7d2d2d", hover_color="#662323", command=self.cancel_selected_tasks).pack(side="left", fill="x", expand=True, padx=(4, 0))
+        ctk.CTkButton(btn_frame, text="🧹 Limpiar cola", fg_color="#7d2d2d", hover_color="#662323", command=self.clear_queue).pack(side="left", fill="x", expand=True, padx=(4, 0))
 
         self.refresh_queue_view()
 
@@ -1001,6 +1051,7 @@ class PSNDownloaderApp(ctk.CTk):
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
         btn_frame.pack(side="bottom", fill="x", padx=5, pady=5)
         ctk.CTkButton(btn_frame, text="🔄 Actualizar historial", command=self.refresh_history_view).pack(side="left", fill="x", expand=True, padx=(0, 5))
+        ctk.CTkButton(btn_frame, text="🧹 Limpiar historial", fg_color="#7d2d2d", hover_color="#662323", command=self.clear_history).pack(side="left", fill="x", expand=True, padx=(5, 0))
         self.refresh_history_view()
 
     def add_content_item(
@@ -1364,7 +1415,16 @@ class PSNDownloaderApp(ctk.CTk):
                 )
             )
 
-    def load_all_data(self):
+    def clear_history(self):
+        if not messagebox.askyesno("Limpiar historial", "¿Quieres borrar todo el historial de acciones?"):
+            return
+        self.init_catalog_db()
+        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+            conn.execute("DELETE FROM action_history")
+        self.refresh_history_view()
+        self.status_label.configure(text="Historial limpiado")
+
+    def load_all_data(self, populate=True):
         if self.catalog_db_is_current():
             self.load_catalog_from_db()
         else:
@@ -1380,7 +1440,8 @@ class PSNDownloaderApp(ctk.CTk):
             self.save_catalog_to_db()
 
         self.data_store = self.catalog[self.current_platform]
-        self.populate_trees()
+        if populate:
+            self.populate_trees()
 
     def load_catalog_sources(self):
         def build_source_url(base_url, file_name):
@@ -1476,7 +1537,12 @@ class PSNDownloaderApp(ctk.CTk):
             return {}
 
     def update_catalogs_from_sources(self):
+        if self.catalog_update_running:
+            self.status_label.configure(text="Actualización de catálogos ya en curso...")
+            return
         sources = self.load_catalog_sources()
+        self.catalog_update_running = True
+        self.set_busy_state("Actualizando catálogos desde las fuentes configuradas...")
         logging.info("Actualización de catálogos iniciada: %d fuente(s)", len(sources))
         threading.Thread(target=self._update_catalogs_worker, args=(sources,), daemon=True).start()
 
@@ -1566,12 +1632,20 @@ class PSNDownloaderApp(ctk.CTk):
                 self.record_history("catalog_update", platform, category, safe_name, "failed", {"error": last_error})
 
         self.save_catalog_state(state)
-        self.after(0, self.load_all_data)
-        self.after(0, self.refresh_downloads_view)
+        self.load_all_data(populate=False)
         message = f"Actualizados: {len(updated)}"
         if failed:
             message += f"\nFallidos: {len(failed)}\n" + "\n".join(failed[:8])
-        self.after(0, lambda: messagebox.showinfo("Actualizar catálogos", message))
+        self.after(0, lambda: self.finish_catalog_update(message))
+
+    def finish_catalog_update(self, message):
+        self.catalog_update_running = False
+        self.data_store = self.catalog[self.current_platform]
+        self.populate_trees()
+        self.refresh_downloads_view()
+        self.refresh_queue_view()
+        self.clear_busy_state("Estado: Listo")
+        messagebox.showinfo("Actualizar catálogos", message)
 
     def catalog_source_summary(self):
         sources = self.load_catalog_sources()
@@ -2486,6 +2560,27 @@ class PSNDownloaderApp(ctk.CTk):
         if keep_selected:
             self.queue_tree.selection_set(keep_selected)
 
+    def clear_queue(self):
+        if not messagebox.askyesno("Limpiar cola", "¿Quieres borrar la cola? Las descargas en curso se conservarán."):
+            return
+        kept = []
+        removed = 0
+        with self.download_lock:
+            for task_id in self.download_order:
+                task = self.download_tasks.get(task_id)
+                if not task:
+                    continue
+                if task.status == "downloading":
+                    kept.append(task_id)
+                    continue
+                removed += 1
+                self.download_tasks.pop(task_id, None)
+                self.running_task_ids.discard(task_id)
+            self.download_order = kept
+        self.save_queue_state()
+        self.refresh_queue_view()
+        self.status_label.configure(text=f"Cola limpiada: {removed} tarea(s) eliminada(s)")
+
     def selected_queue_tasks(self):
         if not hasattr(self, "queue_tree"):
             return []
@@ -2915,6 +3010,55 @@ class PSNDownloaderApp(ctk.CTk):
                     folder,
                 )
             )
+
+    def clear_downloads_for_current_platform(self):
+        platform = self.current_platform
+        blocking_statuses = {"queued", "downloading", "paused"}
+        with self.download_lock:
+            blocking = [
+                task for task in self.download_tasks.values()
+                if task.platform == platform and task.status in blocking_statuses
+            ]
+        if blocking:
+            messagebox.showwarning(
+                "Limpiar descargas",
+                f"Hay {len(blocking)} tarea(s) pendientes o activas de {platform}. Limpia o cancela la cola antes de borrar descargas."
+            )
+            return
+
+        platform_dir = os.path.join(DOWNLOADS_DIR, platform)
+        if not messagebox.askyesno(
+            "Limpiar descargas",
+            f"Esto borrará los archivos descargados de {platform} en:\n{platform_dir}\n\n¿Continuar?"
+        ):
+            return
+
+        removed_manifest = 0
+        for key, entry in list(self.download_manifest.items()):
+            if entry.get("platform", "PS3") == platform:
+                self.download_manifest.pop(key, None)
+                removed_manifest += 1
+        self.save_download_manifest()
+
+        if os.path.isdir(platform_dir):
+            shutil.rmtree(platform_dir)
+        os.makedirs(platform_dir, exist_ok=True)
+
+        with self.download_lock:
+            kept_order = []
+            for task_id in self.download_order:
+                task = self.download_tasks.get(task_id)
+                if task and task.platform == platform:
+                    self.download_tasks.pop(task_id, None)
+                    continue
+                kept_order.append(task_id)
+            self.download_order = kept_order
+        self.save_queue_state()
+
+        self.refresh_downloads_view()
+        self.refresh_queue_view()
+        self.record_history("clear_downloads", platform, "", f"Descargas {platform}", "cleared", {"manifest_entries": removed_manifest, "path": platform_dir})
+        self.status_label.configure(text=f"Descargas de {platform} limpiadas")
 
     def open_downloads_folder(self):
         os.makedirs(DOWNLOADS_DIR, exist_ok=True)

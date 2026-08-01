@@ -30,9 +30,11 @@ Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTki
 * **🧩 Completar Biblioteca:** Analiza lo que ya hay en `Descargas/` y propone contenido relacionado pendiente.
 * **📋 Faltantes Global:** Lista por plataforma todos los juegos con contenido pendiente y permite descargarlo en lote.
 * **🔎 Detalles por Juego:** Doble clic en Biblioteca para ver archivos, rutas, estado, SHA256 y completar faltantes.
+* **🧹 Limpieza Integrada:** Botones para limpiar historial, cola y descargas de la plataforma activa con confirmación.
 * **🎚️ Filtros Avanzados:** Filtra por estado de descarga e integridad además de plataforma, nombre, Title ID y región.
 * **⚙️ Configuración:** Ajusta carpeta de descargas, descargas simultáneas, hilos por archivo, perfil, auto-reanudar cola, auto-actualizar catálogos y accesos a fuentes/logs.
 * **💾 Exportación:** Exporta biblioteca y cola a JSON, o la vista activa a CSV.
+* **⚡ Arranque no Bloqueante:** La ventana aparece rápido y muestra una barra de progreso mientras carga o actualiza la base de datos local.
 * **🔑 Soporte para Licencias:** Botón de acceso directo para descargar paquetes de licencias RAP universales.
 * **🎨 Interfaz Oscura Minimalista:** Desarrollada con CustomTkinter para una experiencia visual limpia y moderna.
 * **📦 Autoinstalación de Dependencias:** Los lanzadores verifican Python, crean `.venv` e instalan las librerías necesarias desde `requirements.txt`.
