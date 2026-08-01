@@ -18,6 +18,13 @@ Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTki
 * **🔍 Búsqueda y Filtros Avanzados:** Filtra por plataforma, nombre, Title ID o región (`US`, `EU`, `JP`, `ASIA`) al instante.
 * **📚 Catálogos Multi-Plataforma:** Soporta PS3, PSP, PS Vita, PSX y PSM desde archivos TSV en la carpeta `data/`.
 * **📂 Organización Automática:** Clasifica y guarda cada tipo de contenido en `Descargas/` por plataforma y tipo de contenido.
+* **📦 Descarga Completa Multi-Juego:** Permite seleccionar varios juegos y revisar, uno a uno, base, última update, DLCs, temas y avatares antes de añadirlos a la cola.
+* **📚 Biblioteca de Descargas:** Muestra juegos descargados por plataforma, estado de base/update, contenido adicional presente y carpeta de destino.
+* **⏯️ Cola de Descargas:** Lista tareas pendientes o activas con progreso, velocidad, pausa, reanudación, cancelación y reintento.
+* **✅ Verificación SHA256:** Si el catálogo incluye hash, valida el archivo al terminar y lo marca como verificado o corrupto.
+* **🔄 Actualizador de Catálogos:** Puede refrescar los TSV desde URLs configurables, guardando backup local y fecha de actualización.
+* **🧩 Completar Biblioteca:** Analiza lo que ya hay en `Descargas/` y propone contenido relacionado pendiente.
+* **💾 Exportación:** Exporta biblioteca y cola a JSON, o la vista activa a CSV.
 * **🔑 Soporte para Licencias:** Botón de acceso directo para descargar paquetes de licencias RAP universales.
 * **🎨 Interfaz Oscura Minimalista:** Desarrollada con CustomTkinter para una experiencia visual limpia y moderna.
 * **📦 Autoinstalación de Dependencias:** El script verifica e instala automáticamente las librerías necesarias (`customtkinter`, `requests`, `beautifulsoup4`) al primer inicio.
@@ -30,7 +37,8 @@ La aplicación opera mediante los siguientes componentes lógicos:
 
 1. **Lectura de Bases de Datos Locales:** El script procesa archivos en formato TSV dentro de `data/` (`PS3_GAMES.tsv`, `PSP_GAMES.tsv`, `PSV_UPDATES.tsv`, etc.) que contienen los catálogos oficiales con los metadatos y las URLs directas de los servidores.
 2. **Detección de Regiones:** Analiza automáticamente el prefijo del *Title ID* (por ejemplo, `BLUS`, `BLES`, `NPUB`) para clasificar la región del juego de forma inteligente.
-3. **Segmentación de Archivos (Multihilo):** 
+3. **Matching de Contenido Relacionado:** Para descargas completas, marca automáticamente coincidencias exactas por Title ID o Content ID y deja como sugerencias no marcadas los contenidos relacionados por nombre y región compatible.
+4. **Segmentación de Archivos (Multihilo):**
    * Primero realiza una petición HTTP `HEAD` para comprobar el tamaño exacto del archivo `.pkg` y si el servidor admite descargas por rangos (`Accept-Ranges`).
    * Si es compatible, divide el archivo en partes iguales y lanza múltiples hilos en paralelo que escriben de manera concurrente en el disco duro, acelerando drásticamente el proceso frente a una descarga lineal tradicional.
 
@@ -67,6 +75,8 @@ La aplicación opera mediante los siguientes componentes lógicos:
 Los lanzadores comprueban Python, crean `.venv`, instalan `requirements.txt` y arrancan `app.py`.
 
 Los catálogos TSV deben vivir en la carpeta `data/`. La raíz del proyecto queda reservada para la app, lanzadores, documentación y assets principales.
+
+Para activar el actualizador de catálogos, copia `catalog_sources.example.json` a `catalog_sources.json` y sustituye las URLs por tus fuentes TSV reales. Cada actualización guarda backups en `data/backups/` y el estado en `data/catalog_state.json`.
 
 ### Uso manual
 

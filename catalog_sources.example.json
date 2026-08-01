@@ -1,0 +1,20 @@
+{
+  "PS3_GAMES.tsv": "https://example.com/PS3_GAMES.tsv",
+  "PS3_UPDATES.tsv": "https://example.com/PS3_UPDATES.tsv",
+  "PS3_DEMOS.tsv": "https://example.com/PS3_DEMOS.tsv",
+  "PS3_THEMES.tsv": "https://example.com/PS3_THEMES.tsv",
+  "PS3_AVATARS.tsv": "https://example.com/PS3_AVATARS.tsv",
+  "PS3_DLCS.tsv": "https://example.com/PS3_DLCS.tsv",
+  "PSP_GAMES.tsv": "https://example.com/PSP_GAMES.tsv",
+  "PSP_UPDATES.tsv": "https://example.com/PSP_UPDATES.tsv",
+  "PSP_DEMOS.tsv": "https://example.com/PSP_DEMOS.tsv",
+  "PSP_THEMES.tsv": "https://example.com/PSP_THEMES.tsv",
+  "PSP_DLCS.tsv": "https://example.com/PSP_DLCS.tsv",
+  "PSV_GAMES.tsv": "https://example.com/PSV_GAMES.tsv",
+  "PSV_UPDATES.tsv": "https://example.com/PSV_UPDATES.tsv",
+  "PSV_DEMOS.tsv": "https://example.com/PSV_DEMOS.tsv",
+  "PSV_THEMES.tsv": "https://example.com/PSV_THEMES.tsv",
+  "PSV_DLCS.tsv": "https://example.com/PSV_DLCS.tsv",
+  "PSX_GAMES.tsv": "https://example.com/PSX_GAMES.tsv",
+  "PSM_GAMES.tsv": "https://example.com/PSM_GAMES.tsv"
+}
