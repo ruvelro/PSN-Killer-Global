@@ -1,8 +1,10 @@
 # 🎮 PSN Killer Global
 
+Versión actual: **0.2.0**
+
 Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTkinter** diseñada para buscar, filtrar y descargar contenido oficial de PlayStation de forma masiva y a alta velocidad (juegos, actualizaciones, demos, temas, avatares, DLCs y licencias).
 
-> **💡 Nota importante:** Ideal para respaldar y preservar todo tu contenido digital ante un hipotético cierre de los servidores oficiales de la tienda de PS3. ¡Guarda tus juegos antes de que sea tarde! Xd
+> **Nota importante:** herramienta orientada a preservación digital y respaldo de contenido adquirido legalmente en PS3, PSP, PS Vita, PSX y PSM.
 
 ---
 
@@ -16,7 +18,7 @@ Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTki
 
 * **🚀 Motor de Descarga Turbo Multihilo:** Soporta hasta 16 hilos concurrentes con peticiones HTTP por rangos (`Range`) para exprimir al máximo tu conexión de fibra óptica.
 * **🔍 Búsqueda y Filtros Avanzados:** Filtra por plataforma, nombre, Title ID o región (`US`, `EU`, `JP`, `ASIA`) al instante.
-* **📚 Catálogos Multi-Plataforma:** Soporta PS3, PSP, PS Vita, PSX y PSM desde archivos TSV en la carpeta `data/`.
+* **📚 Catálogos Multi-Plataforma:** Soporta PS3, PSP, PS Vita, PSX y PSM desde catálogos descargados en la carpeta `data/`.
 * **📂 Organización Automática:** Clasifica y guarda cada tipo de contenido en `Descargas/` por plataforma y tipo de contenido.
 * **📦 Descarga Completa Multi-Juego:** Permite seleccionar varios juegos y revisar, uno a uno, base, última update, DLCs, temas y avatares antes de añadirlos a la cola.
 * **📚 Biblioteca de Descargas:** Muestra juegos descargados por plataforma, estado de base/update, contenido adicional presente y carpeta de destino.
@@ -33,7 +35,7 @@ Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTki
 * **💾 Exportación:** Exporta biblioteca y cola a JSON, o la vista activa a CSV.
 * **🔑 Soporte para Licencias:** Botón de acceso directo para descargar paquetes de licencias RAP universales.
 * **🎨 Interfaz Oscura Minimalista:** Desarrollada con CustomTkinter para una experiencia visual limpia y moderna.
-* **📦 Autoinstalación de Dependencias:** El script verifica e instala automáticamente las librerías necesarias (`customtkinter`, `requests`, `beautifulsoup4`) al primer inicio.
+* **📦 Autoinstalación de Dependencias:** Los lanzadores verifican Python, crean `.venv` e instalan las librerías necesarias desde `requirements.txt`.
 
 ---
 

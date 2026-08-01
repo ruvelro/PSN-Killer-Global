@@ -83,9 +83,11 @@ CATALOG_BACKUP_DIR = os.path.join(DATA_DIR, "backups")
 CATALOG_DB_PATH = os.path.join(DATA_DIR, "catalog.sqlite3")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 LOG_PATH = os.path.join(LOG_DIR, "app.log")
+APP_VERSION = "0.2.0"
 DATABASE_TSV_BASE_URL = "https://raw.githubusercontent.com/ruvelro/PSN-Killer-Database/main/data"
 NPS_TSV_BASE_URL = "https://nopaystation.com/tsv"
 VITAWIKI_TSV_BASE_URL = "https://vitawiki.xyz/free"
+CATALOG_PARSER_VERSION = "2"
 
 # URL directa al pack de licencias
 GITHUB_RAP_URL = "https://github.com/TheWizWikii/PS3-Stuff-Repository/releases/download/3/License_Pack_31.153.pkg"
@@ -239,7 +241,7 @@ def format_speed(bytes_per_sec):
 
 
 def parse_size_to_bytes(size_text):
-    if not size_text or size_text == "N/A":
+    if not size_text or size_text in {"N/A", "Sin tamaño", "No disponible"}:
         return 0
     match = re.match(r"\s*([\d.]+)\s*([KMGT]?B)\s*$", size_text, re.IGNORECASE)
     if not match:
@@ -251,7 +253,7 @@ def parse_size_to_bytes(size_text):
 
 
 def format_total_size(bytes_num):
-    return format_bytes(bytes_num) if bytes_num else "N/A"
+    return format_bytes(bytes_num) if bytes_num else "Sin tamaño"
 
 
 def calculate_sha256(path):
@@ -439,6 +441,40 @@ def same_catalog_item(left, right):
     )
 
 
+def is_valid_download_url(url):
+    return (url or "").strip().lower().startswith(("http://", "https://"))
+
+
+def is_missing_value(value):
+    return not (value or "").strip() or (value or "").strip().upper() in {"MISSING", "N/A", "NA"}
+
+
+def catalog_item_key(item):
+    if item.content_id:
+        return ("content_id", item.platform, item.category, item.content_id)
+    if is_valid_download_url(item.url):
+        return ("url", item.platform, item.category, item.url)
+    return (
+        "fallback",
+        item.platform,
+        item.category,
+        item.title_id,
+        item.region,
+        normalize_title(item.name),
+        item.version,
+    )
+
+
+def catalog_item_score(item):
+    score = 0
+    score += 100 if is_valid_download_url(item.url) else 0
+    score += 30 if not is_missing_value(item.license_value) else 0
+    score += 20 if not is_missing_value(item.sha256) else 0
+    score += 10 if parse_size_to_bytes(item.size) else 0
+    score += 5 if not is_missing_value(item.required_fw) else 0
+    return score
+
+
 class PSNDownloaderApp(ctk.CTk):
     def __init__(self):
         global DOWNLOADS_DIR
@@ -461,6 +497,7 @@ class PSNDownloaderApp(ctk.CTk):
         }
         self.data_store = self.catalog[self.current_platform]
         self.content_by_url = {}
+        self.content_by_tag = {}
         self.download_manifest = self.load_download_manifest()
         self.download_tasks = {}
         self.download_order = []
@@ -603,7 +640,7 @@ class PSNDownloaderApp(ctk.CTk):
 
         title_label = ctk.CTkLabel(
             top_frame, 
-            text="🎮 PSN Killer Global (Downloader)",
+            text=f"🎮 PSN Killer Global v{APP_VERSION}",
             font=ctk.CTkFont(size=20, weight="bold")
         )
         title_label.pack(side="left", padx=15)
@@ -643,6 +680,15 @@ class PSNDownloaderApp(ctk.CTk):
             command=self.open_settings_dialog
         )
         settings_btn.pack(side="right", padx=(0, 8), pady=5)
+
+        about_btn = ctk.CTkButton(
+            top_frame,
+            text="ℹ️ Acerca de",
+            fg_color="#5c5c5c",
+            hover_color="#474747",
+            command=self.open_about_dialog
+        )
+        about_btn.pack(side="right", padx=(0, 8), pady=5)
 
         search_frame = ctk.CTkFrame(self)
         search_frame.pack(fill="x", padx=10, pady=5)
@@ -721,21 +767,12 @@ class PSNDownloaderApp(ctk.CTk):
         )
         self.count_label.pack(side="left", padx=15, pady=2)
 
-        # Barra de estado inferior con la marca de agua integrada de forma sutil
+        # Barra de estado inferior
         self.status_frame = ctk.CTkFrame(self, height=35)
         self.status_frame.pack(fill="x", side="bottom", padx=10, pady=5)
 
         self.status_label = ctk.CTkLabel(self.status_frame, text="Estado: Listo", font=ctk.CTkFont(size=12))
         self.status_label.pack(side="left", padx=10)
-
-        # MARCA DE AGUA: Creado por TheWizWiki (Discreta a la derecha de la barra de estado)
-        watermark_label = ctk.CTkLabel(
-            self.status_frame, 
-            text="✨ Creado por TheWizWiki", 
-            font=ctk.CTkFont(size=11, slant="italic"),
-            text_color="#888888"
-        )
-        watermark_label.pack(side="right", padx=15)
 
         self.progress_bar = ctk.CTkProgressBar(self.status_frame)
         self.progress_bar.pack(side="right", padx=10, pady=8)
@@ -999,9 +1036,27 @@ class PSNDownloaderApp(ctk.CTk):
             original_name=original_name,
             item_type=item_type
         )
-        self.catalog[platform][category].append(item)
-        self.content_by_url[url] = item
+        items = self.catalog[platform][category]
+        key = catalog_item_key(item)
+        for index, existing in enumerate(items):
+            if catalog_item_key(existing) != key:
+                continue
+            if catalog_item_score(item) > catalog_item_score(existing):
+                items[index] = item
+                if is_valid_download_url(item.url):
+                    self.content_by_url[item.url] = item
+                self.content_by_tag[self.catalog_item_tag(item)] = item
+                return item
+            return existing
+
+        items.append(item)
+        if is_valid_download_url(item.url):
+            self.content_by_url[item.url] = item
+        self.content_by_tag[self.catalog_item_tag(item)] = item
         return item
+
+    def catalog_item_tag(self, item):
+        return "|".join(str(part) for part in catalog_item_key(item))
 
     def header_value(self, row, header, *names):
         for name in names:
@@ -1010,6 +1065,16 @@ class PSNDownloaderApp(ctk.CTk):
                 return row[index].strip()
         return ""
 
+    def row_pkg_url(self, row, header):
+        if header:
+            for name in ("pkg direct link", "update url", "download url", "url"):
+                value = self.header_value(row, header, name)
+                if is_valid_download_url(value):
+                    return value
+            return ""
+        url_index = next((i for i, col in enumerate(row) if col.strip().startswith(("http://", "https://"))), None)
+        return row[url_index].strip() if url_index is not None else ""
+
     def parse_catalog_row(self, platform, category, row, header=None):
         if not row:
             return None
@@ -1017,11 +1082,7 @@ class PSNDownloaderApp(ctk.CTk):
         if header is None and row[0].strip().lower() in ["title id", "id", "title_id"]:
             return None
 
-        url_index = next((i for i, col in enumerate(row) if col.strip().startswith("http")), None)
-        if url_index is None:
-            return None
-
-        url = row[url_index].strip()
+        url = self.row_pkg_url(row, header)
         title_id = self.header_value(row, header, "title id") if header else row[0].strip()
         region = self.header_value(row, header, "region") if header else ""
         name = self.header_value(row, header, "name") if header else ""
@@ -1059,10 +1120,12 @@ class PSNDownloaderApp(ctk.CTk):
         if category != "Updates" or version == "Base":
             version = name_version
 
-        size_str = format_bytes(file_size) if file_size.isdigit() else "N/A"
-        if size_str == "N/A":
+        size_str = format_bytes(file_size) if file_size.isdigit() else "Sin tamaño"
+        if size_str == "Sin tamaño" and url:
             size_match = re.search(r'\.pkg(\d+)$', url, re.IGNORECASE)
-            size_str = format_bytes(size_match.group(1)) if size_match else "N/A"
+            size_str = format_bytes(size_match.group(1)) if size_match else "Sin tamaño"
+        if not url:
+            size_str = "No disponible"
 
         return {
             "platform": platform,
@@ -1170,8 +1233,11 @@ class PSNDownloaderApp(ctk.CTk):
         current = self.catalog_files_metadata()
         with sqlite3.connect(CATALOG_DB_PATH) as conn:
             row = conn.execute("SELECT value FROM catalog_meta WHERE key='tsv_metadata'").fetchone()
+            parser_row = conn.execute("SELECT value FROM catalog_meta WHERE key='parser_version'").fetchone()
             count = conn.execute("SELECT COUNT(*) FROM catalog_items").fetchone()[0]
         if not row or not count:
+            return False
+        if not parser_row or parser_row[0] != CATALOG_PARSER_VERSION:
             return False
         try:
             return json.loads(row[0]) == current
@@ -1208,6 +1274,10 @@ class PSNDownloaderApp(ctk.CTk):
                 "INSERT OR REPLACE INTO catalog_meta(key, value) VALUES('rebuilt_at', ?)",
                 (datetime.now().isoformat(timespec="seconds"),)
             )
+            conn.execute(
+                "INSERT OR REPLACE INTO catalog_meta(key, value) VALUES('parser_version', ?)",
+                (CATALOG_PARSER_VERSION,)
+            )
         logging.info("SQLite reconstruido: %d elemento(s)", len(rows))
 
     def load_catalog_from_db(self):
@@ -1217,6 +1287,7 @@ class PSNDownloaderApp(ctk.CTk):
             for platform in PLATFORM_CATALOGS
         }
         self.content_by_url = {}
+        self.content_by_tag = {}
         with sqlite3.connect(CATALOG_DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("""
@@ -1302,6 +1373,7 @@ class PSNDownloaderApp(ctk.CTk):
                 for platform in PLATFORM_CATALOGS
             }
             self.content_by_url = {}
+            self.content_by_tag = {}
             for platform, files in PLATFORM_CATALOGS.items():
                 for category, file_name in files.items():
                     self.load_tsv_catalog(platform, category, file_name)
@@ -1377,7 +1449,8 @@ class PSNDownloaderApp(ctk.CTk):
                 header = {name.strip().lower(): index for index, name in enumerate(first_row)} if has_header else None
                 rows = reader if has_header else [first_row, *reader]
                 for row in rows:
-                    if self.parse_catalog_row(platform, category, row, header):
+                    parsed_row = self.parse_catalog_row(platform, category, row, header)
+                    if parsed_row and is_valid_download_url(parsed_row.get("url")):
                         parsed += 1
         except OSError as e:
             return False, 0, str(e)
@@ -1500,6 +1573,35 @@ class PSNDownloaderApp(ctk.CTk):
             message += f"\nFallidos: {len(failed)}\n" + "\n".join(failed[:8])
         self.after(0, lambda: messagebox.showinfo("Actualizar catálogos", message))
 
+    def catalog_source_summary(self):
+        sources = self.load_catalog_sources()
+        primary_values = [config.get("primary", "") for config in sources.values() if isinstance(config, dict)]
+        primary = primary_values[0] if primary_values else self.app_config.get("catalog_primary_base_url", "")
+        if "PSN-Killer-Database" in primary:
+            source_name = "PSN-Killer-Database"
+        elif "nopaystation.com" in primary:
+            source_name = "NoPayStation"
+        elif "vitawiki.xyz" in primary:
+            source_name = "VitaWiki"
+        else:
+            source_name = primary or "Personalizada"
+        return source_name, primary
+
+    def open_about_dialog(self):
+        source_name, source_url = self.catalog_source_summary()
+        messagebox.showinfo(
+            "Acerca de PSN Killer Global",
+            (
+                f"PSN Killer Global v{APP_VERSION}\n\n"
+                "Herramienta de preservación y descarga de catálogos PSN para PS3, PSP, PS Vita, PSX y PSM.\n\n"
+                "Repositorio principal:\n"
+                "https://github.com/ruvelro/PSN-Killer-Global\n\n"
+                "Catálogo activo:\n"
+                f"{source_name}\n{source_url}\n\n"
+                "Fuentes compatibles: PSN-Killer-Database, NoPayStation, VitaWiki y mirrors personalizados."
+            )
+        )
+
     def open_settings_dialog(self):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Configuración")
@@ -1538,9 +1640,11 @@ class PSNDownloaderApp(ctk.CTk):
         update_days_var = tk.StringVar(value=str(self.app_config.get("catalog_update_interval_days", 0)))
         ctk.CTkEntry(frame, textvariable=update_days_var).pack(fill="x", padx=10, pady=(0, 8))
 
+        source_name, source_url = self.catalog_source_summary()
+        ctk.CTkLabel(frame, text=f"Fuente activa: {source_name}", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=10, pady=(4, 2))
         source_hint = ctk.CTkLabel(
             frame,
-            text=f"Fuentes de catálogos: {CATALOG_SOURCES_PATH}",
+            text=f"{source_url}\nConfig editable: {CATALOG_SOURCES_PATH}",
             text_color="#b0b0b0",
             wraplength=620
         )
@@ -1632,7 +1736,7 @@ class PSNDownloaderApp(ctk.CTk):
                     "",
                     "end",
                     values=(item.title_id, item.region, item.name, item.version, item.size),
-                    tags=(item.url,)
+                    tags=(self.catalog_item_tag(item),)
                 )
         
         self.update_summary_count()
@@ -1664,7 +1768,7 @@ class PSNDownloaderApp(ctk.CTk):
                         "",
                         "end",
                         values=(item.title_id, item.region, item.name, item.version, item.size),
-                        tags=(item.url,)
+                        tags=(self.catalog_item_tag(item),)
                     )
 
         self.update_summary_count()
@@ -1709,10 +1813,10 @@ class PSNDownloaderApp(ctk.CTk):
     def tree_item_to_content(self, tree, item_id, category):
         values = tree.item(item_id)["values"]
         tags = tree.item(item_id)["tags"]
-        url = tags[0] if tags else ""
-        return self.content_by_url.get(
-            url,
-            ContentItem(category, values[0], values[1], values[2], values[3], values[4], url, platform=self.current_platform)
+        item_tag = tags[0] if tags else ""
+        return self.content_by_tag.get(
+            item_tag,
+            ContentItem(category, values[0], values[1], values[2], values[3], values[4], "", platform=self.current_platform)
         )
 
     def update_is_latest(self, item, candidates):
@@ -2181,9 +2285,13 @@ class PSNDownloaderApp(ctk.CTk):
                     match_label.pack(fill="x", anchor="w", padx=32, pady=(4, 1))
 
                     for item in match_items:
-                        var = tk.BooleanVar(value=self.item_selected_by_default(item, category, related))
-                        text = f"[{item.title_id} | {item.region}] {item.name} - {item.version} - {item.size}"
+                        downloadable = is_valid_download_url(item.url)
+                        var = tk.BooleanVar(value=downloadable and self.item_selected_by_default(item, category, related))
+                        suffix = "" if downloadable else " - No descargable"
+                        text = f"[{item.title_id} | {item.region}] {item.name} - {item.version} - {item.size}{suffix}"
                         checkbox = ctk.CTkCheckBox(scroll, text=text, variable=var, command=lambda: update_selection_summary())
+                        if not downloadable:
+                            checkbox.configure(state="disabled")
                         checkbox.pack(fill="x", anchor="w", padx=48, pady=2)
                         checkbox_rows.append((var, base_item, game_key, related, item))
 
@@ -2215,7 +2323,7 @@ class PSNDownloaderApp(ctk.CTk):
 
         def mark_all():
             for var, _base_item, _game_key, _related, _item in checkbox_rows:
-                var.set(True)
+                var.set(is_valid_download_url(_item.url))
             update_selection_summary()
 
         def mark_latest_updates():
@@ -2234,7 +2342,8 @@ class PSNDownloaderApp(ctk.CTk):
             for var, base_item, game_key, _related, item in checkbox_rows:
                 if var.get():
                     selected_by_game.setdefault(game_key, {"base": base_item, "items": []})
-                    selected_by_game[game_key]["items"].append(item)
+                    if is_valid_download_url(item.url):
+                        selected_by_game[game_key]["items"].append(item)
 
             if not selected_by_game:
                 messagebox.showwarning("Atención", "No hay contenido seleccionado para descargar.")
@@ -2262,6 +2371,8 @@ class PSNDownloaderApp(ctk.CTk):
             os.makedirs(os.path.join(game_dir, folder), exist_ok=True)
 
         for item in selected_items:
+            if not is_valid_download_url(item.url):
+                continue
             dest_dir = os.path.join(game_dir, category_folder(item.category))
             os.makedirs(dest_dir, exist_ok=True)
             dest_path = unique_path(os.path.join(dest_dir, item_filename(item)))
@@ -2824,16 +2935,21 @@ class PSNDownloaderApp(ctk.CTk):
             return
 
         target_dir = os.path.join(DOWNLOADS_DIR, self.current_platform, category_folder(category))
+        queued_count = 0
+        skipped_count = 0
 
         for item_id in selected_items:
             item_values = tree.item(item_id)['values']
             tags = tree.item(item_id)['tags']
-            raw_url = tags[0]
-            item = self.content_by_url.get(raw_url)
+            item_tag = tags[0] if tags else ""
+            item = self.content_by_tag.get(item_tag)
             if not item:
                 name = item_values[2]
                 version = item_values[3]
-                item = ContentItem(category, item_values[0], item_values[1], name, version, item_values[4], raw_url, platform=self.current_platform)
+                item = ContentItem(category, item_values[0], item_values[1], name, version, item_values[4], "", platform=self.current_platform)
+            if not is_valid_download_url(item.url):
+                skipped_count += 1
+                continue
 
             clean_title = sanitize_filename(item.name)
             custom_filename = item_filename(item)
@@ -2845,8 +2961,13 @@ class PSNDownloaderApp(ctk.CTk):
             game_key = f"{sanitize_filename(item.name)} [{item.title_id}]"
             self.register_manifest_entry(item, item, game_key, dest_path, "queued")
             self.enqueue_download(clean_url, dest_path, clean_title, item.category, item.platform, item, item, game_key)
+            queued_count += 1
 
-        self.status_label.configure(text=f"Elemento(s) añadido(s) a la cola: {len(selected_items)}")
+        if skipped_count and not queued_count:
+            messagebox.showwarning("No disponible", "Los elementos seleccionados no tienen PKG descargable en el catálogo.")
+        elif skipped_count:
+            messagebox.showinfo("Descargas", f"Añadidos: {queued_count}\nNo disponibles omitidos: {skipped_count}")
+        self.status_label.configure(text=f"Elemento(s) añadido(s) a la cola: {queued_count}")
 
     def download_rap(self):
         filename = os.path.join(CARPETAS["RAP"], "License_Pack_31.153.pkg")

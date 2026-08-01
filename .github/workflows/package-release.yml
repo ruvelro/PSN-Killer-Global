@@ -1,0 +1,41 @@
+name: Package release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  package:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+            launcher: launch_linux.sh
+          - os: macos-latest
+            name: macos
+            launcher: launch_macos.sh
+          - os: windows-latest
+            name: windows
+            launcher: launch_windows.bat
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p "dist/PSN-Killer-Global-${{ matrix.name }}"
+          cp app.py clean_updates.py requirements.txt README.md catalog_sources.example.json "dist/PSN-Killer-Global-${{ matrix.name }}/"
+          cp "${{ matrix.launcher }}" "dist/PSN-Killer-Global-${{ matrix.name }}/"
+          mkdir -p "dist/PSN-Killer-Global-${{ matrix.name }}/data"
+          touch "dist/PSN-Killer-Global-${{ matrix.name }}/data/.gitkeep"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PSN-Killer-Global-${{ matrix.name }}
+          path: dist/PSN-Killer-Global-${{ matrix.name }}
