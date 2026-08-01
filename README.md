@@ -37,23 +37,48 @@ La aplicación opera mediante los siguientes componentes lógicos:
 
 ## ⚙️ Requisitos Previos
 
-* Tener instalado **Python 3.8** o superior en tu sistema.
+* En macOS, el lanzador usa **Homebrew** para instalar Python y evitar el Python de Xcode con Tk antiguo.
+* En Linux, el lanzador usa `apt`, `dnf`, `pacman` o `zypper` si falta Python/Tkinter.
+* En Windows, el lanzador usa `winget` si falta Python.
 
 ---
 
 ## 🚀 Instalación y Uso
 
 1. Clona este repositorio o descarga los archivos fuente.
-2. Crea y activa un entorno virtual:
+2. Ejecuta el lanzador de tu sistema:
+
+   **macOS**
+   ```bash
+   ./launch_macos.sh
+   ```
+
+   **Linux**
+   ```bash
+   ./launch_linux.sh
+   ```
+
+   **Windows**
+   ```bat
+   launch_windows.bat
+   ```
+
+Los lanzadores comprueban Python, crean `.venv`, instalan `requirements.txt` y arrancan `app.py`.
+
+### Uso manual
+
+Si prefieres hacerlo a mano:
+
+1. Crea y activa un entorno virtual:
    ```bash
    python3 -m venv .venv
    source .venv/bin/activate
    ```
-3. Instala las dependencias:
+2. Instala las dependencias:
    ```bash
    pip install -r requirements.txt
    ```
-4. Arranca la app:
+3. Arranca la app:
    ```bash
    python app.py
    ```
