@@ -4,6 +4,10 @@ __pycache__/
 .DS_Store
 Descargas/
 downloads_manifest.json
+download_queue.json
+app_config.json
 catalog_sources.json
 data/catalog_state.json
 data/backups/
+logs/
+*.part

@@ -60,7 +60,8 @@ import requests
 import threading
 import hashlib
 import shutil
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from difflib import SequenceMatcher
 from tkinter import ttk, filedialog
@@ -73,9 +74,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "Descargas")
 MANIFEST_PATH = os.path.join(BASE_DIR, "downloads_manifest.json")
+QUEUE_STATE_PATH = os.path.join(BASE_DIR, "download_queue.json")
+APP_CONFIG_PATH = os.path.join(BASE_DIR, "app_config.json")
 CATALOG_SOURCES_PATH = os.path.join(BASE_DIR, "catalog_sources.json")
 CATALOG_STATE_PATH = os.path.join(DATA_DIR, "catalog_state.json")
 CATALOG_BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+LOG_PATH = os.path.join(LOG_DIR, "app.log")
 
 # URL directa al pack de licencias
 GITHUB_RAP_URL = "https://github.com/TheWizWikii/PS3-Stuff-Repository/releases/download/3/License_Pack_31.153.pkg"
@@ -96,6 +101,14 @@ for folder in CARPETAS.values():
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(CATALOG_BACKUP_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    encoding="utf-8"
+)
 
 
 @dataclass
@@ -134,6 +147,8 @@ class DownloadTask:
     error: str = ""
     created_at: str = ""
     completed_at: str = ""
+    total_size: int = 0
+    resume_path: str = ""
 
 
 class DownloadCancelled(Exception):
@@ -284,7 +299,13 @@ PLATFORM_CATALOGS = {
 CONTENT_ORDER = ["Juegos", "Updates", "DLCs", "Temas", "Avatares", "Demos"]
 GROUPED_DOWNLOAD_PLATFORMS = {"PS3", "PSP", "PSV"}
 RELATED_CATEGORIES = ["Juegos", "Updates", "DLCs", "Temas", "Avatares"]
-MAX_ACTIVE_DOWNLOADS = 2
+DEFAULT_APP_CONFIG = {
+    "downloads_dir": DOWNLOADS_DIR,
+    "max_active_downloads": 2,
+    "threads_per_download": 16,
+    "auto_resume_queue": False,
+}
+MAX_ACTIVE_DOWNLOADS = DEFAULT_APP_CONFIG["max_active_downloads"]
 DOWNLOAD_FOLDER_TO_CATEGORY = {
     "Base": "Juegos",
     "Updates": "Updates",
@@ -376,6 +397,10 @@ def unique_path(dest_path):
     return dest_path
 
 
+def partial_path(dest_path):
+    return f"{dest_path}.part"
+
+
 def manifest_key(game_key, item):
     return f"{item.platform}|{game_key}|{item.category}|{item.title_id}|{item.version}|{item.url}"
 
@@ -401,13 +426,19 @@ def same_catalog_item(left, right):
 
 class PSNDownloaderApp(ctk.CTk):
     def __init__(self):
+        global DOWNLOADS_DIR
         super().__init__()
 
         self.title("PSN Killer Global")
-        self.geometry("1180x740")
+        self.geometry("1400x780")
 
         self.setup_dark_theme()
 
+        self.app_config = self.load_app_config()
+        DOWNLOADS_DIR = self.app_config.get("downloads_dir", DOWNLOADS_DIR)
+        os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+        self.max_active_downloads = int(self.app_config.get("max_active_downloads", 2))
+        self.threads_per_download = int(self.app_config.get("threads_per_download", 16))
         self.current_platform = "PS3"
         self.catalog = {
             platform: {category: [] for category in CONTENT_ORDER}
@@ -421,10 +452,16 @@ class PSNDownloaderApp(ctk.CTk):
         self.download_lock = threading.Lock()
         self.download_task_seq = 0
         self.active_downloads = 0
+        self.running_task_ids = set()
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.create_ui()
         self.load_all_data()
+        self.load_queue_state()
         self.refresh_downloads_view()
+        self.refresh_queue_view()
+        if self.app_config.get("auto_resume_queue"):
+            self.schedule_downloads()
 
     def setup_dark_theme(self):
         """ Configura el estilo oscuro minimalista para los Treeview de Tkinter """
@@ -465,6 +502,80 @@ class PSNDownloaderApp(ctk.CTk):
             background=[("active", "#3a3a3a")]
         )
 
+    def load_app_config(self):
+        config = dict(DEFAULT_APP_CONFIG)
+        if os.path.exists(APP_CONFIG_PATH):
+            try:
+                with open(APP_CONFIG_PATH, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+                if isinstance(saved, dict):
+                    config.update(saved)
+            except (json.JSONDecodeError, OSError) as e:
+                logging.warning("No se pudo leer app_config.json: %s", e)
+        return config
+
+    def save_app_config(self):
+        with open(APP_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(self.app_config, f, indent=2, ensure_ascii=False)
+
+    def content_item_to_dict(self, item):
+        return asdict(item) if item else None
+
+    def content_item_from_dict(self, data):
+        if not isinstance(data, dict):
+            return None
+        fields = {field: data.get(field, "") for field in ContentItem.__dataclass_fields__}
+        return ContentItem(**fields)
+
+    def task_to_dict(self, task):
+        data = asdict(task)
+        data["base_item"] = self.content_item_to_dict(task.base_item)
+        data["manifest_item"] = self.content_item_to_dict(task.manifest_item)
+        return data
+
+    def task_from_dict(self, data):
+        fields = {}
+        for field, definition in DownloadTask.__dataclass_fields__.items():
+            value = data.get(field)
+            fields[field] = definition.default if value is None else value
+        fields["base_item"] = self.content_item_from_dict(data.get("base_item"))
+        fields["manifest_item"] = self.content_item_from_dict(data.get("manifest_item"))
+        task = DownloadTask(**fields)
+        if task.status == "downloading":
+            task.status = "paused"
+        return task
+
+    def save_queue_state(self):
+        with self.download_lock:
+            data = {
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+                "tasks": [self.task_to_dict(self.download_tasks[task_id]) for task_id in self.download_order],
+            }
+        with open(QUEUE_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    def load_queue_state(self):
+        if not os.path.exists(QUEUE_STATE_PATH):
+            return
+        try:
+            with open(QUEUE_STATE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for row in data.get("tasks", []):
+                task = self.task_from_dict(row)
+                self.download_tasks[task.task_id] = task
+                self.download_order.append(task.task_id)
+                self.download_task_seq = max(self.download_task_seq, task.task_id)
+            logging.info("Cola restaurada: %d tarea(s)", len(self.download_order))
+        except (json.JSONDecodeError, OSError, TypeError) as e:
+            logging.exception("No se pudo restaurar la cola: %s", e)
+
+    def on_close(self):
+        try:
+            self.save_queue_state()
+        except OSError as e:
+            logging.exception("No se pudo guardar la cola al cerrar: %s", e)
+        self.destroy()
+
     def create_ui(self):
         top_frame = ctk.CTkFrame(self, height=50)
         top_frame.pack(fill="x", padx=10, pady=5)
@@ -503,6 +614,15 @@ class PSNDownloaderApp(ctk.CTk):
         )
         export_btn.pack(side="right", padx=(0, 8), pady=5)
 
+        settings_btn = ctk.CTkButton(
+            top_frame,
+            text="⚙️ Config",
+            fg_color="#5c5c5c",
+            hover_color="#474747",
+            command=self.open_settings_dialog
+        )
+        settings_btn.pack(side="right", padx=(0, 8), pady=5)
+
         search_frame = ctk.CTkFrame(self)
         search_frame.pack(fill="x", padx=10, pady=5)
 
@@ -527,6 +647,30 @@ class PSNDownloaderApp(ctk.CTk):
         )
         self.region_combo.set("TODAS")
         self.region_combo.pack(side="left", padx=10)
+
+        status_label = ctk.CTkLabel(search_frame, text="📌 Estado:", font=ctk.CTkFont(weight="bold"))
+        status_label.pack(side="left", padx=(5, 5))
+
+        self.status_filter_combo = ctk.CTkComboBox(
+            search_frame,
+            values=["TODOS", "NO DESCARGADO", "DESCARGADO", "PENDIENTE", "ERROR", "CORRUPTO"],
+            width=135,
+            command=self.filter_tables
+        )
+        self.status_filter_combo.set("TODOS")
+        self.status_filter_combo.pack(side="left", padx=(0, 8))
+
+        integrity_label = ctk.CTkLabel(search_frame, text="✅ Hash:", font=ctk.CTkFont(weight="bold"))
+        integrity_label.pack(side="left", padx=(0, 5))
+
+        self.integrity_filter_combo = ctk.CTkComboBox(
+            search_frame,
+            values=["TODOS", "CON SHA256", "SIN SHA256", "VERIFICADO", "CORRUPTO"],
+            width=120,
+            command=self.filter_tables
+        )
+        self.integrity_filter_combo.set("TODOS")
+        self.integrity_filter_combo.pack(side="left", padx=(0, 8))
 
         platform_label = ctk.CTkLabel(search_frame, text="🎛️ Plataforma:", font=ctk.CTkFont(weight="bold"))
         platform_label.pack(side="left", padx=(10, 5))
@@ -610,7 +754,7 @@ class PSNDownloaderApp(ctk.CTk):
         self.current_platform = platform
         self.data_store = self.catalog[self.current_platform]
         self.build_platform_tabs()
-        self.populate_trees()
+        self.filter_tables()
         self.refresh_downloads_view()
         self.refresh_queue_view()
 
@@ -695,6 +839,7 @@ class PSNDownloaderApp(ctk.CTk):
 
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.downloads_tree.yview)
         self.downloads_tree.configure(yscrollcommand=scrollbar.set)
+        self.downloads_tree.bind("<Double-1>", lambda event: self.open_selected_library_details())
         self.downloads_tree.pack(side="left", fill="both", expand=True, padx=5, pady=5)
         scrollbar.pack(side="right", fill="y", pady=5)
 
@@ -712,6 +857,9 @@ class PSNDownloaderApp(ctk.CTk):
             command=self.start_complete_library_dialog
         )
         complete_btn.pack(side="left", fill="x", expand=True, padx=4)
+
+        details_btn = ctk.CTkButton(btn_frame, text="🔎 Detalles", command=self.open_selected_library_details)
+        details_btn.pack(side="left", fill="x", expand=True, padx=4)
 
         open_btn = ctk.CTkButton(btn_frame, text="📂 Abrir carpeta Descargas", command=self.open_downloads_folder)
         open_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
@@ -939,6 +1087,7 @@ class PSNDownloaderApp(ctk.CTk):
                 "Crea catalog_sources.json junto a app.py con pares \"archivo.tsv\": \"https://...\" para activar esta función."
             )
             return
+        logging.info("Actualización de catálogos iniciada: %d fuente(s)", len(sources))
         threading.Thread(target=self._update_catalogs_worker, args=(sources,), daemon=True).start()
 
     def _update_catalogs_worker(self, sources):
@@ -974,10 +1123,12 @@ class PSNDownloaderApp(ctk.CTk):
                     "bytes": len(response.content),
                 }
                 updated.append(safe_name)
+                logging.info("Catálogo actualizado: %s desde %s", safe_name, url)
             except Exception as e:
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
                 failed.append(f"{safe_name}: {e}")
+                logging.exception("Error actualizando catálogo %s: %s", safe_name, e)
 
         self.save_catalog_state(state)
         self.after(0, self.load_all_data)
@@ -986,6 +1137,98 @@ class PSNDownloaderApp(ctk.CTk):
         if failed:
             message += f"\nFallidos: {len(failed)}\n" + "\n".join(failed[:8])
         self.after(0, lambda: messagebox.showinfo("Actualizar catálogos", message))
+
+    def open_settings_dialog(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Configuración")
+        dialog.geometry("680x360")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        frame = ctk.CTkFrame(dialog)
+        frame.pack(fill="both", expand=True, padx=15, pady=15)
+
+        ctk.CTkLabel(frame, text="Carpeta de descargas", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=10, pady=(10, 2))
+        downloads_var = tk.StringVar(value=self.app_config.get("downloads_dir", DOWNLOADS_DIR))
+        downloads_row = ctk.CTkFrame(frame, fg_color="transparent")
+        downloads_row.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkEntry(downloads_row, textvariable=downloads_var).pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        def choose_downloads_dir():
+            selected = filedialog.askdirectory(initialdir=downloads_var.get() or BASE_DIR)
+            if selected:
+                downloads_var.set(selected)
+
+        ctk.CTkButton(downloads_row, text="Elegir", width=90, command=choose_downloads_dir).pack(side="right")
+
+        ctk.CTkLabel(frame, text="Descargas simultáneas", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=10, pady=(8, 2))
+        active_var = tk.StringVar(value=str(self.max_active_downloads))
+        ctk.CTkEntry(frame, textvariable=active_var).pack(fill="x", padx=10, pady=(0, 8))
+
+        ctk.CTkLabel(frame, text="Hilos por archivo", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=10, pady=(8, 2))
+        threads_var = tk.StringVar(value=str(self.threads_per_download))
+        ctk.CTkEntry(frame, textvariable=threads_var).pack(fill="x", padx=10, pady=(0, 8))
+
+        auto_resume_var = tk.BooleanVar(value=bool(self.app_config.get("auto_resume_queue")))
+        ctk.CTkCheckBox(frame, text="Reanudar automáticamente la cola al abrir", variable=auto_resume_var).pack(anchor="w", padx=10, pady=(8, 8))
+
+        source_hint = ctk.CTkLabel(
+            frame,
+            text=f"Fuentes de catálogos: {CATALOG_SOURCES_PATH}",
+            text_color="#b0b0b0",
+            wraplength=620
+        )
+        source_hint.pack(fill="x", padx=10, pady=(4, 8))
+
+        source_row = ctk.CTkFrame(frame, fg_color="transparent")
+        source_row.pack(fill="x", padx=10, pady=(0, 8))
+
+        def open_path(path):
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            elif os.name == "nt":
+                os.startfile(path)
+            else:
+                subprocess.Popen(["xdg-open", path])
+
+        def open_sources_file():
+            if not os.path.exists(CATALOG_SOURCES_PATH):
+                shutil.copy2(os.path.join(BASE_DIR, "catalog_sources.example.json"), CATALOG_SOURCES_PATH)
+            open_path(CATALOG_SOURCES_PATH)
+
+        ctk.CTkButton(source_row, text="Abrir fuentes", command=open_sources_file).pack(side="left", fill="x", expand=True, padx=(0, 5))
+        ctk.CTkButton(source_row, text="Abrir logs", command=lambda: open_path(LOG_DIR)).pack(side="left", fill="x", expand=True, padx=(5, 0))
+
+        button_bar = ctk.CTkFrame(dialog)
+        button_bar.pack(fill="x", padx=15, pady=(0, 15))
+
+        def save_settings():
+            global DOWNLOADS_DIR
+            try:
+                max_active = max(1, min(8, int(active_var.get())))
+                threads = max(1, min(32, int(threads_var.get())))
+            except ValueError:
+                messagebox.showerror("Configuración", "Los valores numéricos no son válidos.")
+                return
+
+            downloads_dir = downloads_var.get().strip() or DOWNLOADS_DIR
+            os.makedirs(downloads_dir, exist_ok=True)
+            DOWNLOADS_DIR = downloads_dir
+            self.app_config.update({
+                "downloads_dir": downloads_dir,
+                "max_active_downloads": max_active,
+                "threads_per_download": threads,
+                "auto_resume_queue": bool(auto_resume_var.get()),
+            })
+            self.max_active_downloads = max_active
+            self.threads_per_download = threads
+            self.save_app_config()
+            self.refresh_downloads_view()
+            self.schedule_downloads()
+            dialog.destroy()
+
+        ctk.CTkButton(button_bar, text="Guardar", command=save_settings).pack(side="right", padx=5)
+        ctk.CTkButton(button_bar, text="Cancelar", fg_color="#555555", command=dialog.destroy).pack(side="right", padx=5)
 
     def update_summary_count(self):
         counts = {cat: len(self.trees[cat].get_children()) for cat in self.active_categories()}
@@ -1023,6 +1266,9 @@ class PSNDownloaderApp(ctk.CTk):
     def filter_tables(self, event=None):
         query = self.search_entry.get().strip().lower()
         selected_region = self.region_combo.get()
+        selected_status = self.status_filter_combo.get()
+        selected_integrity = self.integrity_filter_combo.get()
+        entries = list(self.merged_download_entries().values())
 
         for cat in self.active_categories():
             items = self.data_store[cat]
@@ -1036,8 +1282,10 @@ class PSNDownloaderApp(ctk.CTk):
 
                 match_text = (query in title_id) or (query in game_name)
                 match_region = (selected_region == "TODAS") or (region == selected_region)
+                match_status = self.item_matches_status_filter(item, entries, selected_status)
+                match_integrity = self.item_matches_integrity_filter(item, entries, selected_integrity)
 
-                if match_text and match_region:
+                if match_text and match_region and match_status and match_integrity:
                     tree.insert(
                         "",
                         "end",
@@ -1046,6 +1294,43 @@ class PSNDownloaderApp(ctk.CTk):
                     )
 
         self.update_summary_count()
+
+    def matching_download_entries_for_item(self, item, entries):
+        return [
+            entry for entry in entries
+            if entry.get("platform", "PS3") == item.platform and same_catalog_item(item, entry)
+        ]
+
+    def item_matches_status_filter(self, item, entries, selected_status):
+        if selected_status == "TODOS":
+            return True
+        matches = self.matching_download_entries_for_item(item, entries)
+        statuses = {entry.get("status", "") for entry in matches}
+        if selected_status == "NO DESCARGADO":
+            return not matches
+        if selected_status == "DESCARGADO":
+            return "complete" in statuses
+        if selected_status == "PENDIENTE":
+            return bool(statuses & {"queued", "downloading", "paused"})
+        if selected_status == "ERROR":
+            return bool(statuses & {"error", "cancelled"})
+        if selected_status == "CORRUPTO":
+            return "corrupt" in statuses or any(entry.get("integrity") == "corrupt" for entry in matches)
+        return True
+
+    def item_matches_integrity_filter(self, item, entries, selected_integrity):
+        if selected_integrity == "TODOS":
+            return True
+        matches = self.matching_download_entries_for_item(item, entries)
+        if selected_integrity == "CON SHA256":
+            return valid_sha256(item.sha256)
+        if selected_integrity == "SIN SHA256":
+            return not valid_sha256(item.sha256)
+        if selected_integrity == "VERIFICADO":
+            return any(entry.get("integrity") == "verified" for entry in matches)
+        if selected_integrity == "CORRUPTO":
+            return any(entry.get("integrity") == "corrupt" for entry in matches)
+        return True
 
     def tree_item_to_content(self, tree, item_id, category):
         values = tree.item(item_id)["values"]
@@ -1197,6 +1482,104 @@ class PSNDownloaderApp(ctk.CTk):
             header_text=f"Contenido pendiente para {len(proposals)} juego(s) de {self.current_platform}",
             include_base=False
         )
+
+    def open_selected_library_details(self):
+        if not hasattr(self, "downloads_tree"):
+            return
+        selected = self.downloads_tree.selection()
+        if not selected:
+            messagebox.showinfo("Detalles", "Selecciona un juego en Descargas.")
+            return
+        values = self.downloads_tree.item(selected[0])["values"]
+        if not values:
+            return
+        game_name = values[0]
+        folder = values[-1]
+        entries = [
+            entry for entry in self.merged_download_entries().values()
+            if entry.get("platform", "PS3") == self.current_platform
+            and (entry.get("game_name") == game_name or entry.get("game_key") == game_name or os.path.dirname(entry.get("path", "")) == folder)
+        ]
+        if not entries:
+            messagebox.showinfo("Detalles", "No he encontrado entradas para ese juego.")
+            return
+
+        base_title_id = next((entry.get("base_title_id", "") for entry in entries if entry.get("base_title_id")), "")
+        base_item = next((item for item in self.catalog[self.current_platform]["Juegos"] if item.title_id == base_title_id), None)
+        if not base_item:
+            base_item = next((item for item in self.catalog[self.current_platform]["Juegos"] if item.name == game_name), None)
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(f"Detalles - {game_name}")
+        dialog.geometry("980x620")
+        dialog.transient(self)
+
+        title = ctk.CTkLabel(dialog, text=f"{game_name} ({self.current_platform})", font=ctk.CTkFont(size=16, weight="bold"))
+        title.pack(fill="x", padx=15, pady=(15, 5))
+
+        columns = ("category", "title_id", "name", "version", "status", "integrity", "path")
+        detail_tree = ttk.Treeview(dialog, columns=columns, show="headings", selectmode="browse")
+        headings = {
+            "category": "Tipo",
+            "title_id": "Title ID",
+            "name": "Nombre",
+            "version": "Versión",
+            "status": "Estado",
+            "integrity": "SHA256",
+            "path": "Ruta",
+        }
+        widths = {"category": 90, "title_id": 100, "name": 280, "version": 90, "status": 95, "integrity": 95, "path": 300}
+        for col in columns:
+            detail_tree.heading(col, text=headings[col])
+            detail_tree.column(col, width=widths[col], anchor="w" if col in {"name", "path"} else "center")
+        detail_tree.pack(fill="both", expand=True, padx=15, pady=10)
+
+        for entry in sorted(entries, key=lambda e: (e.get("category", ""), e.get("name", ""))):
+            detail_tree.insert(
+                "",
+                "end",
+                values=(
+                    entry.get("category", ""),
+                    entry.get("title_id", ""),
+                    entry.get("name", ""),
+                    entry.get("version", ""),
+                    entry.get("status", ""),
+                    entry.get("integrity", ""),
+                    entry.get("path", ""),
+                )
+            )
+
+        button_bar = ctk.CTkFrame(dialog)
+        button_bar.pack(fill="x", padx=15, pady=(0, 15))
+
+        def complete_missing():
+            if not base_item:
+                messagebox.showinfo("Completar", "No he podido relacionar este juego con el catálogo.")
+                return
+            game_key, missing = self.missing_related_content(base_item)
+            if not any(missing.values()):
+                messagebox.showinfo("Completar", "No hay contenido pendiente detectado.")
+                return
+            dialog.destroy()
+            self.open_related_selection_dialog(
+                [(base_item, game_key, missing)],
+                title=f"Completar - {base_item.name}",
+                header_text=f"Contenido pendiente para {base_item.name}",
+                include_base=False
+            )
+
+        def open_folder():
+            if folder and os.path.exists(folder):
+                if sys.platform == "darwin":
+                    subprocess.Popen(["open", folder])
+                elif os.name == "nt":
+                    os.startfile(folder)
+                else:
+                    subprocess.Popen(["xdg-open", folder])
+
+        ctk.CTkButton(button_bar, text="🧩 Completar faltantes", command=complete_missing).pack(side="left", padx=5)
+        ctk.CTkButton(button_bar, text="📂 Abrir carpeta", command=open_folder).pack(side="left", padx=5)
+        ctk.CTkButton(button_bar, text="Cerrar", fg_color="#555555", command=dialog.destroy).pack(side="right", padx=5)
 
     def start_complete_download_dialog(self, tree):
         selected_items = tree.selection()
@@ -1376,6 +1759,14 @@ class PSNDownloaderApp(ctk.CTk):
 
     def enqueue_download(self, url, dest_path, title, category, platform, base_item=None, manifest_item=None, game_key=""):
         with self.download_lock:
+            for existing in self.download_tasks.values():
+                same_url = existing.url and existing.url == url
+                same_path = os.path.abspath(existing.dest_path) == os.path.abspath(dest_path)
+                if existing.status in {"queued", "downloading", "paused"} and (same_url or same_path):
+                    self.status_label.configure(text=f"Ya estaba en cola: {title}")
+                    logging.info("Descarga duplicada omitida: %s", title)
+                    return existing
+
             self.download_task_seq += 1
             task = DownloadTask(
                 task_id=self.download_task_seq,
@@ -1392,13 +1783,14 @@ class PSNDownloaderApp(ctk.CTk):
             self.download_tasks[task.task_id] = task
             self.download_order.append(task.task_id)
 
+        self.save_queue_state()
         self.refresh_queue_view()
         self.schedule_downloads()
         return task
 
     def schedule_downloads(self):
         with self.download_lock:
-            while self.active_downloads < MAX_ACTIVE_DOWNLOADS:
+            while self.active_downloads < self.max_active_downloads:
                 next_task = next(
                     (self.download_tasks[task_id] for task_id in self.download_order if self.download_tasks[task_id].status == "queued"),
                     None
@@ -1407,9 +1799,11 @@ class PSNDownloaderApp(ctk.CTk):
                     break
                 next_task.status = "downloading"
                 self.active_downloads += 1
+                self.running_task_ids.add(next_task.task_id)
                 threading.Thread(target=self.run_download_task, args=(next_task.task_id,), daemon=True).start()
 
         self.refresh_queue_view()
+        self.save_queue_state()
 
     def run_download_task(self, task_id):
         task = self.download_tasks[task_id]
@@ -1426,6 +1820,8 @@ class PSNDownloaderApp(ctk.CTk):
         finally:
             with self.download_lock:
                 self.active_downloads = max(0, self.active_downloads - 1)
+                self.running_task_ids.discard(task_id)
+            self.save_queue_state()
             self.after(0, self.schedule_downloads)
 
     def refresh_queue_view(self):
@@ -1473,30 +1869,45 @@ class PSNDownloaderApp(ctk.CTk):
         return selected
 
     def pause_selected_tasks(self):
-        for task in self.selected_queue_tasks():
+        tasks = self.selected_queue_tasks()
+        if not tasks:
+            return
+        for task in tasks:
             if task.status in {"queued", "downloading"}:
                 task.status = "paused"
         self.status_label.configure(text="Descarga(s) pausada(s)")
         self.refresh_queue_view()
+        self.save_queue_state()
 
     def resume_selected_tasks(self):
-        for task in self.selected_queue_tasks():
+        tasks = self.selected_queue_tasks()
+        if not tasks:
+            return
+        for task in tasks:
             if task.status == "paused":
-                task.status = "downloading" if task.progress > 0 else "queued"
+                task.status = "downloading" if task.task_id in self.running_task_ids else "queued"
         self.status_label.configure(text="Descarga(s) reanudada(s)")
         self.refresh_queue_view()
+        self.save_queue_state()
         self.schedule_downloads()
 
     def cancel_selected_tasks(self):
-        for task in self.selected_queue_tasks():
-            if task.status in {"queued", "paused", "downloading", "error"}:
+        tasks = self.selected_queue_tasks()
+        if not tasks:
+            return
+        for task in tasks:
+            if task.status in {"queued", "paused", "downloading", "error", "corrupt"}:
                 task.status = "cancelled"
         self.status_label.configure(text="Descarga(s) cancelada(s)")
         self.refresh_queue_view()
+        self.save_queue_state()
         self.schedule_downloads()
 
     def retry_selected_tasks(self):
-        for task in self.selected_queue_tasks():
+        tasks = self.selected_queue_tasks()
+        if not tasks:
+            return
+        for task in tasks:
             if task.status in {"error", "cancelled", "complete", "corrupt"}:
                 task.status = "queued"
                 task.progress = 0.0
@@ -1507,6 +1918,7 @@ class PSNDownloaderApp(ctk.CTk):
                     self.register_manifest_entry(task.base_item, task.manifest_item, task.game_key, task.dest_path, "queued")
         self.status_label.configure(text="Descarga(s) reenviada(s) a la cola")
         self.refresh_queue_view()
+        self.save_queue_state()
         self.schedule_downloads()
 
     def wait_if_task_paused(self, task):
@@ -1524,6 +1936,7 @@ class PSNDownloaderApp(ctk.CTk):
             task.progress = max(0.0, min(1.0, progress))
         if speed:
             task.speed = speed
+        self.save_queue_state()
         self.after(0, self.refresh_queue_view)
 
     def complete_task(self, task):
@@ -1532,6 +1945,7 @@ class PSNDownloaderApp(ctk.CTk):
         task.status = "complete"
         task.progress = 1.0
         task.completed_at = datetime.now().isoformat(timespec="seconds")
+        self.save_queue_state()
         self.after(0, self.refresh_queue_view)
 
     def fail_task(self, task, error):
@@ -1539,6 +1953,7 @@ class PSNDownloaderApp(ctk.CTk):
             return
         task.error = str(error)
         task.status = "cancelled" if isinstance(error, DownloadCancelled) else "error"
+        self.save_queue_state()
         self.after(0, self.refresh_queue_view)
 
     def queue_report_rows(self):
@@ -1640,6 +2055,7 @@ class PSNDownloaderApp(ctk.CTk):
 
     def register_manifest_entry(self, base_item, item, game_key, path, status):
         key = manifest_key(game_key, item)
+        logging.info("Manifest %s: %s [%s]", status, item.name, item.platform)
         self.download_manifest[key] = {
             "platform": base_item.platform,
             "game_key": game_key,
@@ -1685,9 +2101,11 @@ class PSNDownloaderApp(ctk.CTk):
 
         actual_sha256 = calculate_sha256(path)
         if actual_sha256.lower() == item.sha256.lower():
+            logging.info("SHA256 verificado: %s", path)
             self.update_manifest_integrity(base_item, item, game_key, path, "complete", "verified", actual_sha256)
             return "complete"
 
+        logging.warning("SHA256 corrupto: %s esperado=%s real=%s", path, item.sha256, actual_sha256)
         self.update_manifest_integrity(base_item, item, game_key, path, "corrupt", "corrupt", actual_sha256)
         return "corrupt"
 
@@ -1919,8 +2337,12 @@ class PSNDownloaderApp(ctk.CTk):
         Motor de descarga Ultra-Turbo con 16 hilos simultáneos y huella de navegador web de alta gama.
         """
         try:
+            logging.info("Descarga iniciada: %s -> %s", title, dest_path)
             self.wait_if_task_paused(task)
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            temp_path = partial_path(dest_path)
+            if task:
+                task.resume_path = temp_path
             session = requests.Session()
             session.headers.update({
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -1938,8 +2360,11 @@ class PSNDownloaderApp(ctk.CTk):
             head_res = session.head(url, allow_redirects=True, timeout=10)
             total_size = int(head_res.headers.get('content-length', 0))
             accept_ranges = head_res.headers.get('accept-ranges', '').lower()
+            if task:
+                task.total_size = total_size
 
-            if total_size <= 0 or 'bytes' not in accept_ranges:
+            existing_partial = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
+            if total_size <= 0 or 'bytes' not in accept_ranges or existing_partial:
                 self._single_thread_download(session, url, dest_path, title, total_size, task)
                 if base_item and manifest_item and game_key:
                     final_status = self.verify_download_integrity(base_item, manifest_item, game_key, dest_path)
@@ -1955,13 +2380,13 @@ class PSNDownloaderApp(ctk.CTk):
                 self.complete_task(task)
                 return
 
-            num_threads = 16
+            num_threads = max(1, self.threads_per_download)
             chunk_size = total_size // num_threads
             lock = threading.Lock()
             downloaded_bytes = [0] * num_threads
             part_errors = []
             
-            with open(dest_path, 'wb') as f:
+            with open(temp_path, 'wb') as f:
                 f.truncate(total_size)
 
             def download_part(thread_id, start, end):
@@ -1971,7 +2396,7 @@ class PSNDownloaderApp(ctk.CTk):
                     with session.get(url, headers=headers, stream=True, timeout=20) as r:
                         r.raise_for_status()
                         current_pos = start
-                        with open(dest_path, 'r+b') as f:
+                        with open(temp_path, 'r+b') as f:
                             f.seek(current_pos)
                             for chunk in r.iter_content(chunk_size=131072):
                                 self.wait_if_task_paused(task)
@@ -2025,6 +2450,7 @@ class PSNDownloaderApp(ctk.CTk):
             if part_errors:
                 raise part_errors[0]
 
+            os.replace(temp_path, dest_path)
             self.progress_bar.set(1.0)
             self.status_label.configure(text=f"✅ Finalizado: {os.path.basename(dest_path)}")
             if base_item and manifest_item and game_key:
@@ -2039,9 +2465,11 @@ class PSNDownloaderApp(ctk.CTk):
                     self.status_label.configure(text=f"Corrupto: {os.path.basename(dest_path)}")
                     return
             self.complete_task(task)
+            logging.info("Descarga completada: %s", dest_path)
 
         except DownloadCancelled as e:
             self.fail_task(task, e)
+            logging.info("Descarga cancelada: %s", dest_path)
             self.status_label.configure(text=f"Cancelado: {os.path.basename(dest_path)}")
             if base_item and manifest_item and game_key:
                 self.register_manifest_entry(base_item, manifest_item, game_key, dest_path, "cancelled")
@@ -2049,6 +2477,7 @@ class PSNDownloaderApp(ctk.CTk):
         except Exception as e:
             self.status_label.configure(text="❌ Error en la descarga")
             self.fail_task(task, e)
+            logging.exception("Error descargando %s: %s", title, e)
             if base_item and manifest_item and game_key:
                 self.register_manifest_entry(base_item, manifest_item, game_key, dest_path, "error")
                 self.refresh_downloads_view()
@@ -2057,12 +2486,27 @@ class PSNDownloaderApp(ctk.CTk):
     def _single_thread_download(self, session, url, dest_path, title, total_size, task=None):
         start_time = time.time()
         last_time = start_time
-        downloaded_bytes = 0
-        last_bytes = 0
+        temp_path = partial_path(dest_path)
+        resume_from = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
+        downloaded_bytes = resume_from
+        last_bytes = resume_from
+        headers = {}
+        mode = "ab" if resume_from else "wb"
+        if resume_from and total_size and resume_from < total_size:
+            headers["Range"] = f"bytes={resume_from}-"
+        elif resume_from and total_size and resume_from >= total_size:
+            os.replace(temp_path, dest_path)
+            self.progress_bar.set(1.0)
+            self.update_task_progress(task, 1.0, "")
+            return
 
-        with session.get(url, stream=True, timeout=15) as response:
+        with session.get(url, headers=headers, stream=True, timeout=15) as response:
             response.raise_for_status()
-            with open(dest_path, 'wb') as f:
+            if resume_from and headers and response.status_code != 206:
+                mode = "wb"
+                downloaded_bytes = 0
+                last_bytes = 0
+            with open(temp_path, mode) as f:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     self.wait_if_task_paused(task)
                     if chunk:
@@ -2086,7 +2530,9 @@ class PSNDownloaderApp(ctk.CTk):
                             last_bytes = downloaded_bytes
                             last_time = now
 
+        os.replace(temp_path, dest_path)
         self.progress_bar.set(1.0)
+        self.update_task_progress(task, 1.0, "")
         self.status_label.configure(text=f"✅ Finalizado: {os.path.basename(dest_path)}")
 
 
