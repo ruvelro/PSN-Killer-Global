@@ -90,6 +90,8 @@ NPS_TSV_BASE_URL = "https://nopaystation.com/tsv"
 VITAWIKI_TSV_BASE_URL = "https://vitawiki.xyz/free"
 CATALOG_PARSER_VERSION = "3"
 CATALOG_DB_SCHEMA_VERSION = 2
+# Espera tras la última tecla antes de refiltrar las tablas.
+FILTER_DEBOUNCE_MS = 250
 
 # URL directa al pack de licencias
 GITHUB_RAP_URL = "https://github.com/TheWizWikii/PS3-Stuff-Repository/releases/download/3/License_Pack_31.153.pkg"
@@ -585,6 +587,8 @@ class PSNDownloaderApp(ctk.CTk):
         self.catalog_loading = False
         self.catalog_update_running = False
         self.ui_closed = False
+        self.filter_job = None
+        self.download_entries_cache = None
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.create_ui()
@@ -843,7 +847,7 @@ class PSNDownloaderApp(ctk.CTk):
             placeholder_text="Escribe el nombre del juego (ej: Call of Duty) o Title ID..."
         )
         self.search_entry.pack(side="left", fill="x", expand=True, padx=5, pady=5)
-        self.search_entry.bind("<KeyRelease>", self.filter_tables)
+        self.search_entry.bind("<KeyRelease>", self.schedule_filter)
 
         region_label = ctk.CTkLabel(search_frame, text="🌍 Región:", font=ctk.CTkFont(weight="bold"))
         region_label.pack(side="left", padx=(15, 5))
@@ -1053,7 +1057,7 @@ class PSNDownloaderApp(ctk.CTk):
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
         btn_frame.pack(side="bottom", fill="x", padx=5, pady=5)
 
-        refresh_btn = ctk.CTkButton(btn_frame, text="🔄 Actualizar descargas", command=self.refresh_downloads_view)
+        refresh_btn = ctk.CTkButton(btn_frame, text="🔄 Actualizar descargas", command=self.rescan_downloads_view)
         refresh_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
         complete_btn = ctk.CTkButton(
@@ -1964,18 +1968,37 @@ class PSNDownloaderApp(ctk.CTk):
         
         self.update_summary_count()
 
+    def schedule_filter(self, event=None):
+        """
+        Reagrupa las pulsaciones del buscador.
+
+        Filtrar recorre decenas de miles de elementos y repuebla los Treeview, así
+        que hacerlo en cada tecla dejaba la escritura a tirones.
+        """
+        if self.filter_job is not None:
+            self.after_cancel(self.filter_job)
+        self.filter_job = self.after(FILTER_DEBOUNCE_MS, self.filter_tables)
+
     def filter_tables(self, event=None):
+        if self.filter_job is not None:
+            self.after_cancel(self.filter_job)
+            self.filter_job = None
+
         query = self.search_entry.get().strip().lower()
         selected_region = self.region_combo.get()
         selected_status = self.status_filter_combo.get()
         selected_integrity = self.integrity_filter_combo.get()
-        entries = list(self.merged_download_entries().values())
+
+        # Los filtros de estado e integridad son los únicos que necesitan saber qué
+        # hay descargado. Si están en "TODOS" nos ahorramos el escaneo del disco.
+        needs_entries = selected_status != "TODOS" or selected_integrity != "TODOS"
+        index = self.download_entry_index() if needs_entries else None
 
         for cat in self.active_categories():
             items = self.data_store[cat]
             tree = self.trees[cat]
             tree.delete(*tree.get_children())
-            
+
             for item in items:
                 title_id = item.title_id.lower()
                 region = item.region
@@ -1983,29 +2006,67 @@ class PSNDownloaderApp(ctk.CTk):
 
                 match_text = (query in title_id) or (query in game_name)
                 match_region = (selected_region == "TODAS") or (region == selected_region)
-                match_status = self.item_matches_status_filter(item, entries, selected_status)
-                match_integrity = self.item_matches_integrity_filter(item, entries, selected_integrity)
+                if not (match_text and match_region):
+                    continue
+                if needs_entries and not (
+                    self.item_matches_status_filter(item, index, selected_status)
+                    and self.item_matches_integrity_filter(item, index, selected_integrity)
+                ):
+                    continue
 
-                if match_text and match_region and match_status and match_integrity:
-                    tree.insert(
-                        "",
-                        "end",
-                        values=(item.title_id, item.region, item.name, item.version, item.size),
-                        tags=(self.catalog_item_tag(item),)
-                    )
+                tree.insert(
+                    "",
+                    "end",
+                    values=(item.title_id, item.region, item.name, item.version, item.size),
+                    tags=(self.catalog_item_tag(item),)
+                )
 
         self.update_summary_count()
 
-    def matching_download_entries_for_item(self, item, entries):
-        return [
-            entry for entry in entries
-            if entry.get("platform", "PS3") == item.platform and same_catalog_item(item, entry)
-        ]
+    def download_entry_index(self):
+        """
+        Indexa las descargas conocidas por los tres criterios de same_catalog_item.
 
-    def item_matches_status_filter(self, item, entries, selected_status):
+        Sin esto, cada elemento del catálogo recorría la lista entera de descargas,
+        lo que hacía el filtrado O(elementos x descargas).
+        """
+        entries = self.merged_download_entries().values()
+        index = {"url": {}, "filename": {}, "fields": {}}
+        for entry in entries:
+            platform = entry.get("platform", "PS3")
+            if entry.get("url"):
+                index["url"].setdefault((platform, entry["url"]), []).append(entry)
+            if entry.get("path"):
+                filename = os.path.basename(entry["path"]).lower()
+                index["filename"].setdefault((platform, filename), []).append(entry)
+            index["fields"].setdefault(
+                (platform, entry.get("category"), entry.get("title_id"), entry.get("name"), entry.get("version")),
+                []
+            ).append(entry)
+        return index
+
+    def matching_download_entries_for_item(self, item, index):
+        if index is None:
+            index = self.download_entry_index()
+
+        matches = []
+        seen = set()
+        buckets = (
+            index["url"].get((item.platform, item.url), ()) if item.url else (),
+            index["filename"].get((item.platform, item_filename(item).lower()), ()),
+            index["fields"].get((item.platform, item.category, item.title_id, item.name, item.version), ()),
+        )
+        for bucket in buckets:
+            for entry in bucket:
+                if id(entry) not in seen:
+                    seen.add(id(entry))
+                    matches.append(entry)
+        return matches
+
+    def item_matches_status_filter(self, item, index, selected_status):
         if selected_status == "TODOS":
             return True
-        matches = self.matching_download_entries_for_item(item, entries)
+        matches = self.matching_download_entries_for_item(item, index)
         statuses = {entry.get("status", "") for entry in matches}
         if selected_status == "NO DESCARGADO":
             return not matches
@@ -2019,10 +2080,10 @@ class PSNDownloaderApp(ctk.CTk):
             return "corrupt" in statuses or any(entry.get("integrity") == "corrupt" for entry in matches)
         return True
 
-    def item_matches_integrity_filter(self, item, entries, selected_integrity):
+    def item_matches_integrity_filter(self, item, index, selected_integrity):
         if selected_integrity == "TODOS":
             return True
-        matches = self.matching_download_entries_for_item(item, entries)
+        matches = self.matching_download_entries_for_item(item, index)
         if selected_integrity == "CON SHA256":
             return valid_sha256(item.sha256)
         if selected_integrity == "SIN SHA256":
@@ -2926,6 +2987,9 @@ class PSNDownloaderApp(ctk.CTk):
         return {}
 
     def save_download_manifest(self):
+        # Único punto por el que pasa toda mutación del manifest, así que es el
+        # sitio natural para invalidar la caché de descargas conocidas.
+        self.invalidate_download_entries()
         with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
             json.dump(self.download_manifest, f, indent=2, ensure_ascii=False)
 
@@ -3068,7 +3132,14 @@ class PSNDownloaderApp(ctk.CTk):
                         }
         return scanned
 
+    def invalidate_download_entries(self):
+        """Fuerza un nuevo escaneo del disco la próxima vez que se pidan las descargas."""
+        self.download_entries_cache = None
+
     def merged_download_entries(self):
+        if self.download_entries_cache is not None:
+            return self.download_entries_cache
+
         entries = dict(self.scan_downloads_folder())
         for key, entry in self.download_manifest.items():
             merged = dict(entry)
@@ -3081,7 +3152,14 @@ class PSNDownloaderApp(ctk.CTk):
                     if os.path.abspath(scan_entry.get("path", "")) != os.path.abspath(merged["path"])
                 }
             entries[key] = merged
+
+        self.download_entries_cache = entries
         return entries
+
+    def rescan_downloads_view(self):
+        """Botón "Actualizar descargas": vuelve a mirar el disco, sin usar la caché."""
+        self.invalidate_download_entries()
+        self.refresh_downloads_view()
 
     def refresh_downloads_view(self):
         if not hasattr(self, "downloads_tree"):
