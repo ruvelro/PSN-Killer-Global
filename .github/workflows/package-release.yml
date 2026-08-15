@@ -31,7 +31,7 @@ jobs:
             out="build/PSN-Killer-Global-${name}"
 
             mkdir -p "$out/data"
-            cp app.py clean_updates.py requirements.txt requirements-dev.txt \
+            cp app.py requirements.txt requirements-dev.txt \
                README.md LICENSE catalog_sources.example.json "$out/"
             # El paquete psnkiller lleva toda la lógica: sin él la app no arranca.
             cp -r psnkiller "$out/"

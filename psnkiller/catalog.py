@@ -355,7 +355,8 @@ def parse_catalog_row(platform, category, row, header=None):
     item_type = header_value(row, header, "type") if header else ""
 
     if platform == "PS3" and category == "Updates" and not header:
-        # Formato heredado de clean_updates.py: id, nombre, versión, url.
+        # Formato heredado sin cabecera: id, nombre, versión, url.
+        # Lo sigue usando PS3_UPDATES.tsv, que se publica sin fila de cabecera.
         title_id = row[0].strip()
         name = row[1].strip() if len(row) > 1 else f"Actualización ({title_id})"
         version = row[2].strip() if len(row) > 2 else "v01.00"

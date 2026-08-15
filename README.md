@@ -1,6 +1,6 @@
 # 🎮 PSN Killer Global
 
-Versión actual: **0.4.0**
+Versión actual: **0.4.1**
 
 Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTkinter** diseñada para buscar, filtrar y descargar contenido oficial de PlayStation de forma masiva y a alta velocidad (juegos, actualizaciones, demos, temas, avatares, DLCs y licencias).
 
@@ -148,7 +148,6 @@ psnkiller/
   catalog.py              Parseo de TSV, normalización de títulos, CatalogIndex
   downloader.py           Motor HTTP multihilo
 tests/                    Suite de pytest
-clean_updates.py          Herramienta para convertir volcados HTML a TSV
 ```
 
 El paquete `psnkiller` no depende de Tkinter. El motor de descarga se comunica

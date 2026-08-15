@@ -215,7 +215,7 @@ class TestParseoDeFilas:
         assert r["size"] == "No disponible"
 
     def test_updates_ps3_sin_cabecera(self, catalog_app):
-        """Formato heredado de clean_updates.py: id, nombre, versión, url."""
+        """PS3_UPDATES.tsv se publica sin cabecera: id, nombre, versión, url."""
         fila = ["BLES00483", "Killzone 2", "v01.29", "http://x/y.pkg"]
         r = catalog_app.parse_catalog_row("PS3", "Updates", fila, None)
         assert r["version"] == "v01.29"
