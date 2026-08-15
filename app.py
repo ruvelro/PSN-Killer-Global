@@ -34,7 +34,9 @@ from psnkiller.catalog import (
     RELATED_CATEGORIES,
     CatalogIndex,
     build_header,
+    catalog_item_key,
     catalog_item_tag,
+    clear_title_caches,
     compatible_region,
     format_total_size,
     has_number_conflict,
@@ -838,8 +840,11 @@ class PSNDownloaderApp(ctk.CTk):
     # propiedades lo exponen con los nombres que ya usaba el resto de la clase.
 
     def reset_catalog(self):
-        """Vacía el catálogo en memoria y sus índices auxiliares."""
+        """Vacía el catálogo en memoria, sus índices auxiliares y las cachés derivadas."""
         self._catalog = CatalogIndex()
+        self.related_content_cache = {}
+        self.technical_fields_cache = {}
+        clear_title_caches()
         self.data_store = self.catalog[self.current_platform]
 
     @property
@@ -1668,7 +1673,7 @@ class PSNDownloaderApp(ctk.CTk):
             return False
         return item == max(same_title_updates, key=lambda candidate: version_tuple(candidate.version))
 
-    def is_suggested_match(self, base_item, candidate):
+    def is_suggested_match(self, base_item, candidate, base_tokens=None):
         if candidate.platform != base_item.platform:
             return False
         if candidate.title_id == base_item.title_id:
@@ -1678,7 +1683,8 @@ class PSNDownloaderApp(ctk.CTk):
         if has_number_conflict(base_item.name, candidate.name):
             return False
 
-        base_tokens = meaningful_title_tokens(base_item.name)
+        if base_tokens is None:
+            base_tokens = meaningful_title_tokens(base_item.name)
         candidate_tokens = meaningful_title_tokens(candidate.name)
         if not base_tokens or not candidate_tokens:
             return False
@@ -1686,37 +1692,68 @@ class PSNDownloaderApp(ctk.CTk):
         token_overlap = len(base_tokens & candidate_tokens) / len(base_tokens)
         return token_overlap >= 0.75 and title_similarity(base_item.name, candidate.name) >= 0.72
 
-    def is_exact_related_match(self, base_item, candidate):
+    def candidate_technical_fields(self, candidate):
+        """
+        Campos técnicos del candidato en mayúsculas, memorizados.
+
+        No dependen del juego base, pero se recalculaban para cada juego de la
+        biblioteca: 851.162 llamadas a upper() en un solo refresco. La caché se
+        vacía con el catálogo, que es lo que mantiene vivos a los elementos.
+        """
+        cached = self.technical_fields_cache.get(id(candidate))
+        if cached is None:
+            cached = " ".join([
+                candidate.content_id,
+                candidate.original_name,
+                candidate.url,
+                candidate.name,
+            ]).upper()
+            self.technical_fields_cache[id(candidate)] = cached
+        return cached
+
+    def is_exact_related_match(self, base_item, candidate, base_title_id=None):
         if candidate.platform != base_item.platform:
             return False
         if candidate.title_id and candidate.title_id == base_item.title_id:
             return True
 
-        title_id = base_item.title_id.upper()
-        technical_fields = " ".join([
-            candidate.content_id,
-            candidate.original_name,
-            candidate.url,
-            candidate.name,
-        ]).upper()
-        return bool(title_id and title_id in technical_fields)
+        title_id = base_item.title_id.upper() if base_title_id is None else base_title_id
+        return bool(title_id and title_id in self.candidate_technical_fields(candidate))
 
     def find_related_content(self, base_item):
+        """
+        Contenido relacionado con un juego, exacto y sugerido.
+
+        Recorre el catálogo entero de la plataforma, así que se cachea por juego:
+        la Biblioteca lo pedía para cada juego en cada refresco, y el refresco se
+        dispara al terminar cada descarga. La caché se vacía con el catálogo.
+        """
+        cache_key = catalog_item_key(base_item)
+        cached = self.related_content_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         related = {"Juegos": [], "Updates": [], "DLCs": [], "Temas": [], "Avatares": []}
         base_copy = ContentItem(**{**base_item.__dict__, "match_type": "exact"})
         related["Juegos"].append(base_copy)
 
+        # Invariantes del juego base, fuera del bucle sobre el catálogo.
+        base_title_id = base_item.title_id.upper()
+        base_tokens = meaningful_title_tokens(base_item.name)
+
         for category in ["Updates", "DLCs", "Temas", "Avatares"]:
             for item in self.catalog[base_item.platform].get(category, []):
-                if self.is_exact_related_match(base_item, item):
+                if self.is_exact_related_match(base_item, item, base_title_id):
                     match_type = "exact"
-                elif self.is_suggested_match(base_item, item):
+                elif self.is_suggested_match(base_item, item, base_tokens):
                     match_type = "suggested"
                 else:
                     continue
 
                 item_copy = ContentItem(**{**item.__dict__, "match_type": match_type})
                 related[category].append(item_copy)
+
+        self.related_content_cache[cache_key] = related
 
         return related
 

@@ -290,3 +290,84 @@ class TestCatalogDb:
             columnas = [r[1] for r in conn.execute("PRAGMA table_info(catalog_items)")]
         assert "item_key" in columnas
         assert db_app.catalog_db_is_current() is False  # fuerza reconstruir desde los TSV
+
+
+class TestContenidoRelacionado:
+    """
+    La Biblioteca pedía find_related_content por juego en cada refresco, y el
+    refresco salta al terminar cada descarga: 162 ms por juego, 16 s con 100.
+    """
+
+    def _catalogo(self, catalog_app, n_dlcs=200):
+        juego = catalog_app.add_content_item(
+            platform="PS3", category="Juegos", title_id="BLES00483", region="EU",
+            name="Killzone 2", version="Base", size="10 GB", url="http://x/base.pkg")
+        for i in range(n_dlcs):
+            catalog_app.add_content_item(
+                platform="PS3", category="DLCs", title_id="BLES00483" if i < 5 else f"BLES{i:05d}",
+                region="EU", name=f"Killzone 2 Mapa {i}", version="Base", size="100 MB",
+                url=f"http://x/dlc{i}.pkg", content_id=f"EP0001-BLES00483_00-DLC{i:04d}")
+        return juego
+
+    def test_la_cache_devuelve_lo_mismo(self, catalog_app):
+        juego = self._catalogo(catalog_app)
+        primera = catalog_app.find_related_content(juego)
+        catalog_app.related_content_cache = {}
+        segunda = catalog_app.find_related_content(juego)
+        assert primera == segunda
+
+    def test_la_segunda_llamada_usa_la_cache(self, catalog_app):
+        juego = self._catalogo(catalog_app)
+        assert catalog_app.find_related_content(juego) is catalog_app.find_related_content(juego)
+
+    def test_reset_catalog_vacia_las_caches(self, catalog_app):
+        juego = self._catalogo(catalog_app)
+        catalog_app.find_related_content(juego)
+        assert catalog_app.related_content_cache
+        catalog_app.reset_catalog()
+        assert catalog_app.related_content_cache == {}
+        assert catalog_app.technical_fields_cache == {}
+
+    def test_hoisting_no_cambia_el_resultado(self, catalog_app):
+        """Pasar los invariantes del juego base debe dar exactamente lo mismo."""
+        juego = self._catalogo(catalog_app, n_dlcs=50)
+        base_title_id = juego.title_id.upper()
+        base_tokens = app.meaningful_title_tokens(juego.name)
+        for item in catalog_app.catalog["PS3"]["DLCs"]:
+            assert (catalog_app.is_exact_related_match(juego, item)
+                    == catalog_app.is_exact_related_match(juego, item, base_title_id))
+            assert (catalog_app.is_suggested_match(juego, item)
+                    == catalog_app.is_suggested_match(juego, item, base_tokens))
+
+    def test_campos_tecnicos_memorizados(self, catalog_app):
+        self._catalogo(catalog_app, n_dlcs=10)
+        item = catalog_app.catalog["PS3"]["DLCs"][0]
+        esperado = " ".join([item.content_id, item.original_name, item.url, item.name]).upper()
+        assert catalog_app.candidate_technical_fields(item) == esperado
+        # la segunda llamada sale de la caché
+        assert catalog_app.candidate_technical_fields(item) is catalog_app.technical_fields_cache[id(item)]
+
+    def test_encuentra_los_dlcs_del_mismo_title_id(self, catalog_app):
+        juego = self._catalogo(catalog_app, n_dlcs=20)
+        related = catalog_app.find_related_content(juego)
+        exactos = [i for i in related["DLCs"] if i.match_type == "exact"]
+        assert len(exactos) >= 5
+
+
+class TestCachesDeTitulos:
+    def test_devuelven_frozenset_para_no_corromper_la_cache(self):
+        assert isinstance(app.meaningful_title_tokens("Killzone 2"), frozenset)
+
+    def test_normalize_title_memorizado(self):
+        from psnkiller.catalog import normalize_title
+        normalize_title.cache_clear()
+        normalize_title("LittleBigPlanet GOTY")
+        antes = normalize_title.cache_info().hits
+        normalize_title("LittleBigPlanet GOTY")
+        assert normalize_title.cache_info().hits == antes + 1
+
+    def test_clear_title_caches_las_vacia(self):
+        from psnkiller.catalog import clear_title_caches, normalize_title
+        normalize_title("algo")
+        clear_title_caches()
+        assert normalize_title.cache_info().currsize == 0

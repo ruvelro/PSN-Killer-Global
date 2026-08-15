@@ -7,6 +7,7 @@ pueda probar sin abrir una ventana ni tocar el disco.
 import os
 import re
 from difflib import SequenceMatcher
+from functools import lru_cache
 
 from .models import ContentItem
 from .naming import item_filename
@@ -162,6 +163,15 @@ def valid_sha256(value):
 # Normalización y emparejado de títulos
 # --------------------------------------------------------------------------
 
+# El emparejado de contenido relacionado normaliza los mismos nombres del
+# catálogo una y otra vez: perfilando la Biblioteca salían 246.016 llamadas a
+# normalize_title para sólo 10 juegos, el 66% del tiempo. Son funciones puras
+# sobre un universo acotado (los nombres del catálogo), así que se memorizan.
+# El tamaño cubre con margen los ~66.000 elementos de los catálogos actuales.
+_TITLE_CACHE_SIZE = 1 << 17
+
+
+@lru_cache(maxsize=_TITLE_CACHE_SIZE)
 def normalize_title(text):
     text = (text or "").lower()
     text = text.replace("™", "").replace("®", "")
@@ -172,16 +182,29 @@ def normalize_title(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
+# Devuelven frozenset porque el resultado se comparte entre llamadas: mutarlo
+# corrompería la caché. Las operaciones que se les hacen (&, |, len, !=) son
+# idénticas sobre frozenset.
+@lru_cache(maxsize=_TITLE_CACHE_SIZE)
 def title_tokens(text):
-    return set(normalize_title(text).split())
+    return frozenset(normalize_title(text).split())
 
 
+@lru_cache(maxsize=_TITLE_CACHE_SIZE)
 def meaningful_title_tokens(text):
-    return {token for token in title_tokens(text) if token not in TITLE_STOPWORDS and len(token) > 1}
+    return frozenset(token for token in title_tokens(text)
+                     if token not in TITLE_STOPWORDS and len(token) > 1)
 
 
+@lru_cache(maxsize=_TITLE_CACHE_SIZE)
 def title_numbers(text):
-    return set(re.findall(r"\b\d+\b", normalize_title(text)))
+    return frozenset(re.findall(r"\b\d+\b", normalize_title(text)))
+
+
+def clear_title_caches():
+    """Libera la memoria de las cachés de títulos (tras recargar el catálogo)."""
+    for fn in (normalize_title, title_tokens, meaningful_title_tokens, title_numbers):
+        fn.cache_clear()
 
 
 def has_number_conflict(base_name, candidate_name):
