@@ -134,6 +134,8 @@ CATALOG_DB_SCHEMA_VERSION = 2
 FILTER_DEBOUNCE_MS = 250
 # Intervalo mínimo entre escrituras de download_queue.json por avance de progreso.
 QUEUE_SAVE_INTERVAL_SECONDS = 5.0
+# Margen que se da a las descargas activas para cerrar su .part al salir.
+SHUTDOWN_GRACE_SECONDS = 5.0
 
 # URL directa al pack de licencias
 GITHUB_RAP_URL = "https://github.com/TheWizWikii/PS3-Stuff-Repository/releases/download/3/License_Pack_31.153.pkg"
@@ -227,6 +229,7 @@ class PSNDownloaderApp(ctk.CTk):
         self.queue_state_saved_at = 0.0
         self.queue_refresh_pending = False
         self.catalog_db_ready = False
+        self.shutdown_event = threading.Event()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.create_ui()
@@ -374,7 +377,44 @@ class PSNDownloaderApp(ctk.CTk):
         except (json.JSONDecodeError, OSError, TypeError) as e:
             logging.exception("No se pudo restaurar la cola: %s", e)
 
+    def stop_active_downloads(self, timeout=SHUTDOWN_GRACE_SECONDS):
+        """
+        Pide a las descargas en curso que paren y les da tiempo a cerrar el .part.
+
+        Los hilos son daemon: sin esto, destroy() los mata a media escritura y
+        el .part queda con bytes a medias, que en la siguiente sesión se toman
+        por progreso válido y producen un .pkg corrupto.
+
+        Las tareas quedan en pausa, no canceladas, para poder reanudarlas al
+        volver a abrir. Devuelve las que no llegaron a pararse a tiempo.
+        """
+        self.shutdown_event.set()
+        with self.download_lock:
+            activas = [self.download_tasks[task_id] for task_id in self.running_task_ids
+                       if task_id in self.download_tasks]
+
+        if not activas:
+            return []
+
+        logging.info("Cerrando: esperando a %d descarga(s) activa(s)", len(activas))
+        limite = time.monotonic() + timeout
+        while time.monotonic() < limite:
+            with self.download_lock:
+                if not self.running_task_ids:
+                    return []
+            time.sleep(0.05)
+
+        with self.download_lock:
+            rezagadas = [self.download_tasks[task_id] for task_id in self.running_task_ids
+                         if task_id in self.download_tasks]
+        if rezagadas:
+            logging.warning("Cerrando con %d descarga(s) sin detenerse a tiempo", len(rezagadas))
+        return rezagadas
+
     def on_close(self):
+        # Primero parar las descargas: cambia el estado de las tareas y hay que
+        # guardarlo después, no antes.
+        self.stop_active_downloads()
         try:
             self.save_queue_state()
         except OSError as e:
@@ -2297,6 +2337,9 @@ class PSNDownloaderApp(ctk.CTk):
         return task
 
     def schedule_downloads(self):
+        if self.shutdown_event.is_set():
+            # No arrancar descargas nuevas mientras se está cerrando.
+            return
         with self.download_lock:
             while self.active_downloads < self.max_active_downloads:
                 next_task = next(
@@ -2451,9 +2494,19 @@ class PSNDownloaderApp(ctk.CTk):
         self.schedule_downloads()
 
     def wait_if_task_paused(self, task):
+        """
+        Punto de control del motor de descarga: bloquea en pausa, corta al cancelar.
+
+        Se llama a menudo desde los hilos de descarga, así que también es donde
+        se atiende el cierre de la aplicación.
+        """
+        if self.shutdown_event.is_set():
+            raise DownloadCancelled()
         if not task:
             return
         while task.status == "paused":
+            if self.shutdown_event.is_set():
+                raise DownloadCancelled()
             time.sleep(0.2)
         if task.status == "cancelled":
             raise DownloadCancelled()
@@ -2480,8 +2533,14 @@ class PSNDownloaderApp(ctk.CTk):
     def fail_task(self, task, error):
         if not task:
             return
-        task.error = str(error)
-        task.status = "cancelled" if isinstance(error, DownloadCancelled) else "error"
+        if isinstance(error, DownloadCancelled) and self.shutdown_event.is_set():
+            # Se cortó por cerrar la aplicación, no porque el usuario cancelara:
+            # queda en pausa para poder reanudarla en la siguiente sesión.
+            task.status = "paused"
+            task.error = ""
+        else:
+            task.error = str(error)
+            task.status = "cancelled" if isinstance(error, DownloadCancelled) else "error"
         self.save_queue_state()
         self.request_queue_refresh()
 

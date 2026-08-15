@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -152,8 +153,10 @@ class TestQueueState:
                 self.download_order = []
                 self.download_task_seq = 0
                 self.download_lock = threading.Lock()
+                self.running_task_ids = set()
                 self.queue_state_saved_at = 0.0
                 self.queue_refresh_pending = False
+                self.shutdown_event = threading.Event()
                 self.ui_closed = True
 
         a = QueueApp()
@@ -371,3 +374,89 @@ class TestCachesDeTitulos:
         normalize_title("algo")
         clear_title_caches()
         assert normalize_title.cache_info().currsize == 0
+
+
+class TestCierreLimpio:
+    """
+    Los hilos de descarga son daemon: sin coordinacion, destroy() los mata a
+    media escritura y el .part queda con bytes a medias, que en la siguiente
+    sesion se toman por progreso valido y dan un .pkg corrupto.
+    """
+
+    @pytest.fixture
+    def app_cierre(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(app, "QUEUE_STATE_PATH", str(tmp_path / "q.json"))
+
+        class ShutdownApp(app.PSNDownloaderApp):
+            def __init__(self):
+                self.download_tasks = {}
+                self.download_order = []
+                self.download_task_seq = 0
+                self.download_lock = threading.Lock()
+                self.running_task_ids = set()
+                self.active_downloads = 0
+                self.queue_state_saved_at = 0.0
+                self.queue_refresh_pending = False
+                self.shutdown_event = threading.Event()
+                self.ui_closed = True
+                self.max_active_downloads = 2
+
+        return ShutdownApp()
+
+    def _tarea(self, a, task_id=1, status="downloading"):
+        t = app.DownloadTask(task_id=task_id, url="http://x/y.pkg", dest_path="/d/y.pkg",
+                             title="Juego", platform="PS3", category="Juegos", status=status)
+        a.download_tasks[task_id] = t
+        a.download_order.append(task_id)
+        return t
+
+    def test_sin_descargas_activas_no_espera(self, app_cierre):
+        assert app_cierre.stop_active_downloads(timeout=0.2) == []
+
+    def test_el_hilo_de_descarga_recibe_la_senal(self, app_cierre):
+        tarea = self._tarea(app_cierre)
+        app_cierre.running_task_ids.add(1)
+
+        parado = threading.Event()
+
+        def worker():
+            try:
+                while True:
+                    app_cierre.wait_if_task_paused(tarea)
+                    time.sleep(0.01)
+            except app.DownloadCancelled:
+                with app_cierre.download_lock:
+                    app_cierre.running_task_ids.discard(1)
+                parado.set()
+
+        threading.Thread(target=worker, daemon=True).start()
+        rezagadas = app_cierre.stop_active_downloads(timeout=3)
+
+        assert parado.wait(1), "el hilo no atendio la senal de cierre"
+        assert rezagadas == []
+
+    def test_una_descarga_atascada_se_reporta(self, app_cierre):
+        self._tarea(app_cierre)
+        app_cierre.running_task_ids.add(1)   # nadie la va a liberar
+        rezagadas = app_cierre.stop_active_downloads(timeout=0.3)
+        assert len(rezagadas) == 1
+
+    def test_al_cerrar_queda_en_pausa_no_cancelada(self, app_cierre):
+        """Cerrar la app no es cancelar: al volver debe poder reanudarse."""
+        tarea = self._tarea(app_cierre)
+        app_cierre.shutdown_event.set()
+        app_cierre.fail_task(tarea, app.DownloadCancelled())
+        assert tarea.status == "paused"
+        assert tarea.error == ""
+
+    def test_cancelar_de_verdad_sigue_siendo_cancelado(self, app_cierre):
+        tarea = self._tarea(app_cierre)
+        app_cierre.fail_task(tarea, app.DownloadCancelled())
+        assert tarea.status == "cancelled"
+
+    def test_no_se_arrancan_descargas_nuevas_al_cerrar(self, app_cierre):
+        self._tarea(app_cierre, status="queued")
+        app_cierre.shutdown_event.set()
+        app_cierre.schedule_downloads()
+        assert app_cierre.running_task_ids == set()
+        assert app_cierre.download_tasks[1].status == "queued"
