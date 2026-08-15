@@ -12,7 +12,7 @@ def verificar_e_instalar_dependencias():
         "bs4": "beautifulsoup4",
         "requests": "requests"
     }
-    
+
     faltantes = []
     for mod, pip_name in librerias_requeridas.items():
         try:
@@ -23,15 +23,15 @@ def verificar_e_instalar_dependencias():
     if faltantes:
         root = tk.Tk()
         root.withdraw()
-        
+
         mensaje = (
             f"Para ejecutar esta aplicación se necesitan las siguientes librerías:\n\n"
             f"• {', '.join(faltantes)}\n\n"
             f"¿Deseas instalarlas automáticamente ahora mismo?"
         )
-        
+
         respuesta = messagebox.askyesno("Librerías Faltantes", mensaje)
-        
+
         if respuesta:
             root.destroy()
             print("⏳ Instalando dependencias, por favor espera...")
@@ -429,7 +429,7 @@ DOWNLOAD_FOLDER_TO_CATEGORY = {
 TITLE_STOPWORDS = {
     "the", "a", "an", "and", "of", "for", "to", "in", "on", "with", "edition",
     "game", "pack", "bundle", "level", "map", "skin", "costume", "theme", "avatar",
-    "dlc", "update", "add", "on", "content", "ps3", "psp", "psv", "vita", "psn"
+    "dlc", "update", "add", "content", "ps3", "psp", "psv", "vita", "psn"
 }
 DOWNLOAD_PROFILES = {
     "Base + última update": {"base": True, "latest_update": True, "exact_extras": False, "suggested": False},
@@ -641,7 +641,7 @@ class PSNDownloaderApp(ctk.CTk):
             borderwidth=0,
             font=("Segoe UI", 10)
         )
-        
+
         style.configure(
             "Treeview.Heading",
             background=header_bg,
@@ -665,7 +665,7 @@ class PSNDownloaderApp(ctk.CTk):
         config = dict(DEFAULT_APP_CONFIG)
         if os.path.exists(APP_CONFIG_PATH):
             try:
-                with open(APP_CONFIG_PATH, "r", encoding="utf-8") as f:
+                with open(APP_CONFIG_PATH, encoding="utf-8") as f:
                     saved = json.load(f)
                 if isinstance(saved, dict):
                     config.update(saved)
@@ -750,7 +750,7 @@ class PSNDownloaderApp(ctk.CTk):
         if not os.path.exists(QUEUE_STATE_PATH):
             return
         try:
-            with open(QUEUE_STATE_PATH, "r", encoding="utf-8") as f:
+            with open(QUEUE_STATE_PATH, encoding="utf-8") as f:
                 data = json.load(f)
             for row in data.get("tasks", []):
                 task = self.task_from_dict(row)
@@ -838,17 +838,17 @@ class PSNDownloaderApp(ctk.CTk):
         top_frame.pack(fill="x", padx=10, pady=5)
 
         title_label = ctk.CTkLabel(
-            top_frame, 
+            top_frame,
             text=f"🎮 PSN Killer Global v{APP_VERSION}",
             font=ctk.CTkFont(size=20, weight="bold")
         )
         title_label.pack(side="left", padx=15)
 
         rap_btn = ctk.CTkButton(
-            top_frame, 
-            text="🔑 Descargar Licencias (31.153)", 
-            fg_color="#1f77b4", 
-            hover_color="#135d96", 
+            top_frame,
+            text="🔑 Descargar Licencias (31.153)",
+            fg_color="#1f77b4",
+            hover_color="#135d96",
             command=self.download_rap
         )
         rap_btn.pack(side="right", padx=15, pady=5)
@@ -896,7 +896,7 @@ class PSNDownloaderApp(ctk.CTk):
         search_label.pack(side="left", padx=10)
 
         self.search_entry = ctk.CTkEntry(
-            search_frame, 
+            search_frame,
             placeholder_text="Escribe el nombre del juego (ej: Call of Duty) o Title ID..."
         )
         self.search_entry.pack(side="left", fill="x", expand=True, padx=5, pady=5)
@@ -959,8 +959,8 @@ class PSNDownloaderApp(ctk.CTk):
         self.count_frame.pack(fill="x", padx=10, pady=(2, 2))
 
         self.count_label = ctk.CTkLabel(
-            self.count_frame, 
-            text="📊 Cargando resumen de contenido...", 
+            self.count_frame,
+            text="📊 Cargando resumen de contenido...",
             font=ctk.CTkFont(size=11, weight="normal"),
             text_color="#b0b0b0"
         )
@@ -1045,7 +1045,7 @@ class PSNDownloaderApp(ctk.CTk):
         scrollbar.pack(side="right", fill="y")
 
         tree.bind("<Double-1>", lambda event: self.start_download(tree, category))
-        
+
         button_frame = ctk.CTkFrame(parent, fg_color="transparent")
         button_frame.pack(side="bottom", fill="x", padx=5, pady=(0, 5))
 
@@ -1380,7 +1380,7 @@ class PSNDownloaderApp(ctk.CTk):
         if not os.path.exists(file_path):
             return
 
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(file_path, encoding="utf-8", errors="ignore") as f:
             reader = csv.reader(f, delimiter="\t")
             first_row = next(reader, None)
             if not first_row:
@@ -1648,7 +1648,7 @@ class PSNDownloaderApp(ctk.CTk):
         if not os.path.exists(CATALOG_SOURCES_PATH):
             return default_sources
         try:
-            with open(CATALOG_SOURCES_PATH, "r", encoding="utf-8") as f:
+            with open(CATALOG_SOURCES_PATH, encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, dict):
                 return default_sources
@@ -1683,7 +1683,7 @@ class PSNDownloaderApp(ctk.CTk):
     def validate_catalog_file(self, file_path, platform, category, current_count=0):
         parsed = 0
         try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(file_path, encoding="utf-8", errors="ignore") as f:
                 reader = csv.reader(f, delimiter="\t")
                 first_row = next(reader, None)
                 if not first_row:
@@ -1712,7 +1712,7 @@ class PSNDownloaderApp(ctk.CTk):
         if not os.path.exists(CATALOG_STATE_PATH):
             return {}
         try:
-            with open(CATALOG_STATE_PATH, "r", encoding="utf-8") as f:
+            with open(CATALOG_STATE_PATH, encoding="utf-8") as f:
                 data = json.load(f)
             return data if isinstance(data, dict) else {}
         except (json.JSONDecodeError, OSError):
@@ -2023,7 +2023,7 @@ class PSNDownloaderApp(ctk.CTk):
                     values=(item.title_id, item.region, item.name, item.version, item.size),
                     tags=(self.catalog_item_tag(item),)
                 )
-        
+
         self.update_summary_count()
 
     def schedule_filter(self, event=None):
@@ -2498,7 +2498,7 @@ class PSNDownloaderApp(ctk.CTk):
     def repair_corrupt_downloads(self):
         repaired = 0
         entries = self.merged_download_entries()
-        for key, entry in entries.items():
+        for _key, entry in entries.items():
             if entry.get("platform", "PS3") != self.current_platform:
                 continue
             if entry.get("status") != "corrupt" and entry.get("integrity") != "corrupt":
@@ -3036,7 +3036,7 @@ class PSNDownloaderApp(ctk.CTk):
         if not os.path.exists(MANIFEST_PATH):
             return {}
         try:
-            with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
+            with open(MANIFEST_PATH, encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
@@ -3490,7 +3490,7 @@ class PSNDownloaderApp(ctk.CTk):
             lock = threading.Lock()
             downloaded_bytes = [0] * num_threads
             part_errors = []
-            
+
             with open(temp_path, 'wb') as f:
                 f.truncate(total_size)
 
@@ -3531,14 +3531,14 @@ class PSNDownloaderApp(ctk.CTk):
                 time.sleep(0.2)
                 with lock:
                     current_total = sum(downloaded_bytes)
-                
+
                 now = time.time()
                 elapsed = now - last_time
                 if elapsed >= 0.2:
                     speed = (current_total - last_total_downloaded) / elapsed
                     speed_str = format_speed(speed)
                     percent = current_total / total_size if total_size > 0 else 0
-                    
+
                     self.ui(self.set_progress, percent)
                     self.update_task_progress(task, percent, speed_str)
                     display_filename = os.path.basename(dest_path)
@@ -3628,7 +3628,7 @@ class PSNDownloaderApp(ctk.CTk):
                         if elapsed >= 0.2:
                             speed = (downloaded_bytes - last_bytes) / elapsed
                             speed_str = format_speed(speed)
-                            
+
                             if total_size > 0:
                                 progress = min(1.0, downloaded_bytes / total_size)
                                 self.ui(self.set_progress, progress)

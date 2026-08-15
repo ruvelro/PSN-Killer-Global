@@ -16,3 +16,5 @@ data/catalog.sqlite3-*
 data/backups/
 logs/
 *.part
+.pytest_cache/
+.ruff_cache/
