@@ -29,18 +29,18 @@ def clean_and_convert_updates(input_path, output_path):
 
     print("🔄 Analizando y extrayendo versiones numéricas de las Updates...")
 
-    with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(input_path, encoding="utf-8", errors="ignore") as f:
         content = f.read()
 
     soup = BeautifulSoup(content, 'html.parser')
     rows = soup.find_all('tr')
-    
+
     clean_records = []
 
     if rows:
         for row in rows:
             row_str = str(row)
-            
+
             # Filtrar enlaces PKG válidos
             urls = re.findall(r'(http[s]?://[^\s<"\'\t\n\r]+\.pkg)', row_str, re.IGNORECASE)
             valid_urls = [u for u in urls if '/np//_' not in u and ('_T0' in u or '_00' in u)]
@@ -57,13 +57,13 @@ def clean_and_convert_updates(input_path, output_path):
             # Extraer texto del juego
             cols = row.find_all(['td', 'th'])
             cells_text = [c.get_text(strip=True) for c in cols]
-            
+
             raw_title = ""
             for text in cells_text:
                 if not text.startswith("http") and not re.match(r'^[A-Z]{4}\d{5}$', text):
                     temp_name = re.sub(r'[A-Z]{4}\d{5}', '', text)
                     temp_name = re.sub(r'http[s]?://[^\s]+', '', temp_name).strip()
-                    
+
                     if re.match(r'^[a-fA-F0-9]{15,}', temp_name):
                         continue
 
@@ -95,4 +95,8 @@ def clean_and_convert_updates(input_path, output_path):
     print(f"📄 Guardado en: '{output_path}'")
 
 if __name__ == "__main__":
-    clean_and_convert_updates("PS3_UPDATES.txt", "PS3_UPDATES.tsv")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    clean_and_convert_updates(
+        os.path.join(base_dir, "PS3_UPDATES.txt"),
+        os.path.join(base_dir, "data", "PS3_UPDATES.tsv")
+    )

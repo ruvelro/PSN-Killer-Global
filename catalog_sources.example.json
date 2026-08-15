@@ -1,0 +1,22 @@
+{
+  "primary_base_url": "https://raw.githubusercontent.com/ruvelro/PSN-Killer-Database/main/data",
+  "fallback_base_urls": [
+    "https://nopaystation.com/tsv",
+    "https://vitawiki.xyz/free"
+  ],
+  "sources": {
+    "PS3_UPDATES.tsv": {
+      "primary": "https://raw.githubusercontent.com/ruvelro/PSN-Killer-Database/main/data/PS3_UPDATES.tsv",
+      "fallbacks": [
+        "https://nopaystation.com/tsv/PS3_UPDATES.tsv"
+      ]
+    },
+    "PSX_GAMES.tsv": {
+      "primary": "https://raw.githubusercontent.com/ruvelro/PSN-Killer-Database/main/data/PSX_GAMES.tsv",
+      "fallbacks": [
+        "https://nopaystation.com/tsv/PSX_GAMES.tsv",
+        "https://vitawiki.xyz/free/PS1_GAMES.tsv"
+      ]
+    }
+  }
+}

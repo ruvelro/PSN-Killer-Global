@@ -1,0 +1,4 @@
+customtkinter==5.2.2
+requests>=2.31
+# Sólo lo necesita la herramienta clean_updates.py, no la aplicación.
+beautifulsoup4>=4.12
