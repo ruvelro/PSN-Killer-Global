@@ -112,5 +112,45 @@ Si prefieres hacerlo a mano:
 
 ---
 
+## 🧱 Estructura del Proyecto
+
+```
+app.py                    Interfaz de escritorio (CustomTkinter)
+psnkiller/
+  models.py               ContentItem, DownloadTask, DownloadCancelled
+  naming.py               Nombres y rutas válidas en Windows, Linux y macOS
+  catalog.py              Parseo de TSV, normalización de títulos, CatalogIndex
+  downloader.py           Motor HTTP multihilo
+tests/                    Suite de pytest
+clean_updates.py          Herramienta para convertir volcados HTML a TSV
+```
+
+El paquete `psnkiller` no depende de Tkinter. El motor de descarga se comunica
+con la interfaz mediante callbacks, y es la interfaz quien lleva cada
+actualización al hilo principal de Tk. Hay un test que falla si `downloader.py`
+vuelve a arrastrar Tkinter, para que esa separación no se pierda.
+
+---
+
+## 🧪 Desarrollo
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+ruff check .
+```
+
+La suite no necesita servidor gráfico más allá de importar CustomTkinter: usa
+fixtures sin ventana y, para el motor de descarga, un servidor HTTP local con
+soporte de `Range`. En CI se ejecuta bajo `xvfb` en Python 3.9 y 3.13.
+
+---
+
+## 📄 Licencia
+
+Distribuido bajo licencia [MIT](LICENSE).
+
+---
+
 ## 📜 Descargo de Responsabilidad (Disclaimer)
 Este software se proporciona con fines educativos y de preservación digital de contenido adquirido legalmente. El desarrollador no se hace responsable del mal uso que se le pueda dar a esta herramienta.
