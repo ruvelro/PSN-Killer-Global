@@ -213,3 +213,161 @@ class TestAislamientoDeLaInterfaz:
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         )
         assert salida.stdout.strip() == ""
+
+
+class TestReanudacionMultihilo:
+    """
+    Pausar una descarga multihilo tiraba el .part entero: en un .pkg de 40 GB
+    se perdia todo lo bajado y el reintento caia a monohilo.
+    """
+
+    def test_lo_ya_descargado_no_se_vuelve_a_pedir(self, servidor, tmp_path):
+        datos = _contenido(8 * MB)
+        url = servidor(datos)
+        destino = str(tmp_path / "juego.pkg")
+        parcial = tmp_path / "juego.pkg.part"
+
+        # Simula una descarga interrumpida a mitad: .part preasignado con la
+        # primera mitad de cada rango escrita.
+        from psnkiller.downloader import save_part_state, split_ranges
+        rangos = split_ranges(len(datos), 4)
+        parcial.write_bytes(bytearray(len(datos)))
+        con_datos = bytearray(parcial.read_bytes())
+        hechos = []
+        for inicio, fin in rangos:
+            mitad = (fin - inicio + 1) // 2
+            con_datos[inicio:inicio + mitad] = datos[inicio:inicio + mitad]
+            hechos.append(mitad)
+        parcial.write_bytes(bytes(con_datos))
+        save_part_state(str(parcial), url, len(datos), rangos, hechos)
+
+        FileDownloader(threads_per_download=4).download(url, destino)
+
+        assert open(destino, "rb").read() == datos, "el archivo reanudado no coincide"
+        assert not parcial.exists()
+        assert not os.path.exists(str(parcial) + ".json")
+
+    def test_al_cancelar_se_guarda_el_estado(self, servidor, tmp_path):
+        url = servidor(_contenido(12 * MB))
+        destino = str(tmp_path / "juego.pkg")
+        parcial = str(tmp_path / "juego.pkg.part")
+
+        llamadas = []
+
+        def cancelar_a_medias():
+            llamadas.append(1)
+            if len(llamadas) > 60:
+                raise DownloadCancelled()
+
+        d = FileDownloader(threads_per_download=4, check_control=cancelar_a_medias)
+        with pytest.raises(DownloadCancelled):
+            d.download(url, destino)
+
+        assert os.path.exists(parcial), "el .part debe conservarse para reanudar"
+        assert os.path.exists(parcial + ".json"), "debe quedar el estado por rangos"
+
+    def test_cancelar_y_reanudar_produce_el_archivo_correcto(self, servidor, tmp_path):
+        datos = _contenido(12 * MB)
+        url = servidor(datos)
+        destino = str(tmp_path / "juego.pkg")
+
+        llamadas = []
+
+        def cancelar_a_medias():
+            llamadas.append(1)
+            if len(llamadas) > 60:
+                raise DownloadCancelled()
+
+        with pytest.raises(DownloadCancelled):
+            FileDownloader(threads_per_download=4, check_control=cancelar_a_medias).download(url, destino)
+
+        # Segunda pasada sin interrupciones: debe completar y coincidir byte a byte.
+        FileDownloader(threads_per_download=4).download(url, destino)
+        assert open(destino, "rb").read() == datos
+
+    def test_cambiar_el_numero_de_hilos_no_rompe_la_reanudacion(self, servidor, tmp_path):
+        """Los rangos guardados mandan sobre los que tocarian con la config nueva."""
+        datos = _contenido(12 * MB)
+        url = servidor(datos)
+        destino = str(tmp_path / "juego.pkg")
+
+        llamadas = []
+
+        def cancelar(*_):
+            llamadas.append(1)
+            if len(llamadas) > 60:
+                raise DownloadCancelled()
+
+        with pytest.raises(DownloadCancelled):
+            FileDownloader(threads_per_download=8, check_control=cancelar).download(url, destino)
+
+        FileDownloader(threads_per_download=3).download(url, destino)   # otro numero de hilos
+        assert open(destino, "rb").read() == datos
+
+
+class TestEstadoDelPart:
+    """load_part_state debe rechazar todo estado del que no pueda fiarse."""
+
+    def _preparar(self, tmp_path, total=1024):
+        from psnkiller.downloader import save_part_state
+        parcial = tmp_path / "x.pkg.part"
+        parcial.write_bytes(bytearray(total))
+        rangos = [(0, 511), (512, 1023)]
+        save_part_state(str(parcial), "http://a/b.pkg", total, rangos, [100, 200])
+        return str(parcial), total
+
+    def test_estado_valido_se_acepta(self, tmp_path):
+        from psnkiller.downloader import load_part_state
+        parcial, total = self._preparar(tmp_path)
+        assert load_part_state(parcial, "http://a/b.pkg", total) == [(0, 511, 100), (512, 1023, 200)]
+
+    def test_url_distinta_se_rechaza(self, tmp_path):
+        from psnkiller.downloader import load_part_state
+        parcial, total = self._preparar(tmp_path)
+        assert load_part_state(parcial, "http://otro/b.pkg", total) is None
+
+    def test_tamano_distinto_se_rechaza(self, tmp_path):
+        from psnkiller.downloader import load_part_state
+        parcial, _ = self._preparar(tmp_path)
+        assert load_part_state(parcial, "http://a/b.pkg", 2048) is None
+
+    def test_part_no_preasignado_se_rechaza(self, tmp_path):
+        from psnkiller.downloader import load_part_state
+        parcial, total = self._preparar(tmp_path)
+        with open(parcial, "wb") as f:
+            f.write(b"corto")
+        assert load_part_state(parcial, "http://a/b.pkg", total) is None
+
+    def test_sin_part_se_rechaza(self, tmp_path):
+        from psnkiller.downloader import load_part_state
+        parcial, total = self._preparar(tmp_path)
+        os.remove(parcial)
+        assert load_part_state(parcial, "http://a/b.pkg", total) is None
+
+    def test_json_corrupto_se_rechaza(self, tmp_path):
+        from psnkiller.downloader import load_part_state, part_state_path
+        parcial, total = self._preparar(tmp_path)
+        with open(part_state_path(parcial), "w") as f:
+            f.write("{roto")
+        assert load_part_state(parcial, "http://a/b.pkg", total) is None
+
+    def test_contador_imposible_se_rechaza(self, tmp_path):
+        from psnkiller.downloader import load_part_state, part_state_path, save_part_state
+        parcial, total = self._preparar(tmp_path)
+        save_part_state(parcial, "http://a/b.pkg", total, [(0, 511), (512, 1023)], [999999, 0])
+        assert load_part_state(parcial, "http://a/b.pkg", total) is None
+        assert os.path.exists(part_state_path(parcial))
+
+    def test_rangos_con_hueco_se_rechazan(self, tmp_path):
+        from psnkiller.downloader import load_part_state, save_part_state
+        parcial = tmp_path / "y.pkg.part"
+        parcial.write_bytes(bytearray(1024))
+        save_part_state(str(parcial), "http://a/b.pkg", 1024, [(0, 100), (512, 1023)], [0, 0])
+        assert load_part_state(str(parcial), "http://a/b.pkg", 1024) is None
+
+    def test_clear_part_state_borra_todo(self, tmp_path):
+        from psnkiller.downloader import clear_part_state, part_state_path
+        parcial, _ = self._preparar(tmp_path)
+        clear_part_state(parcial)
+        assert not os.path.exists(part_state_path(parcial))
+        clear_part_state(parcial)   # idempotente

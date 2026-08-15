@@ -7,6 +7,7 @@ interfaz que corresponda. Esa separación es la que evita que se repita el fallo
 de tocar widgets desde un hilo de descarga.
 """
 import hashlib
+import json
 import logging
 import os
 import threading
@@ -36,6 +37,11 @@ BROWSER_HEADERS = {
 # número de hilos, el troceado genera rangos vacíos que el servidor rechaza.
 MIN_BYTES_PER_THREAD = 1024 * 1024
 PROGRESS_INTERVAL_SECONDS = 0.2
+# Cada cuántos bytes se vacía el buffer al disco. Marca el máximo que se puede
+# perder al reanudar: lo no volcado se vuelve a descargar.
+FLUSH_INTERVAL_BYTES = 4 * 1024 * 1024
+PART_STATE_INTERVAL_SECONDS = 2.0
+PART_JOIN_TIMEOUT_SECONDS = 10.0
 
 
 def calculate_sha256(path, block_size=1024 * 1024):
@@ -80,6 +86,85 @@ def split_ranges(total_size, num_threads):
         (i * chunk, (total_size - 1) if i == num_threads - 1 else (i * chunk + chunk - 1))
         for i in range(num_threads)
     ]
+
+
+# --------------------------------------------------------------------------
+# Estado de una descarga multihilo interrumpida
+# --------------------------------------------------------------------------
+# Sin esto, pausar o cerrar durante una descarga multihilo tiraba el .part
+# entero: en un .pkg de 40 GB se perdía todo lo bajado. El sidecar guarda
+# cuánto lleva escrito cada rango para poder retomarlos donde iban.
+
+def part_state_path(temp_path):
+    return f"{temp_path}.json"
+
+
+def save_part_state(temp_path, url, total_size, ranges, done):
+    """Guarda el progreso por rango. Escritura atómica: un corte aquí no debe cegar el .part."""
+    state = {
+        "version": 1,
+        "url": url,
+        "total_size": total_size,
+        "ranges": [[start, end, int(done[i])] for i, (start, end) in enumerate(ranges)],
+    }
+    path = part_state_path(temp_path)
+    temp = f"{path}.tmp"
+    try:
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.replace(temp, path)
+    except OSError as e:
+        logging.warning("No se pudo guardar el estado de %s: %s", temp_path, e)
+
+
+def load_part_state(temp_path, url, total_size):
+    """
+    Devuelve los rangos reanudables, o None si no se puede confiar en el estado.
+
+    Se descarta en cuanto algo no cuadre (otra URL, otro tamaño, el .part no
+    está preasignado, contadores imposibles): reanudar mal produce un .pkg
+    corrupto que además pasaría por completo.
+    """
+    path = part_state_path(temp_path)
+    if not os.path.exists(path) or not os.path.exists(temp_path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if state.get("version") != 1 or state.get("url") != url or state.get("total_size") != total_size:
+        return None
+    # El .part se preasigna al tamaño final; si no lo está, no vale para escribir por offsets.
+    if os.path.getsize(temp_path) != total_size:
+        return None
+
+    ranges = []
+    for entry in state.get("ranges", []):
+        if not isinstance(entry, list) or len(entry) != 3:
+            return None
+        start, end, done = entry
+        if not all(isinstance(v, int) for v in (start, end, done)):
+            return None
+        if not (0 <= start <= end < total_size) or not (0 <= done <= end - start + 1):
+            return None
+        ranges.append((start, end, done))
+
+    if not ranges or ranges[0][0] != 0 or ranges[-1][1] != total_size - 1:
+        return None
+    for (_, fin, _), (inicio, _, _) in zip(ranges, ranges[1:]):
+        if inicio != fin + 1:
+            return None
+    return ranges
+
+
+def clear_part_state(temp_path):
+    for path in (part_state_path(temp_path), f"{part_state_path(temp_path)}.tmp"):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 class FileDownloader:
@@ -133,12 +218,24 @@ class FileDownloader:
         try:
             total_size, accepts_ranges = self._probe(session, url)
             num_threads = plan_thread_count(total_size, requested)
+            resumable = load_part_state(temp_path, url, total_size) if accepts_ranges else None
             existing_partial = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
 
-            if total_size <= 0 or not accepts_ranges or existing_partial or num_threads < 2:
+            if total_size <= 0 or not accepts_ranges or num_threads < 2:
+                clear_part_state(temp_path)
+                self._single_thread(session, url, dest_path, temp_path, total_size)
+            elif resumable:
+                # Se retoman los rangos guardados, no los que tocarían ahora: el
+                # usuario puede haber cambiado el número de hilos entre sesiones.
+                logging.info("Reanudando descarga multihilo: %s", dest_path)
+                self._multi_thread(session, url, dest_path, temp_path, total_size, resumable)
+            elif existing_partial:
+                # .part de una descarga monohilo previa, o estado no fiable.
+                clear_part_state(temp_path)
                 self._single_thread(session, url, dest_path, temp_path, total_size)
             else:
-                self._multi_thread(session, url, dest_path, temp_path, total_size, num_threads)
+                ranges = [(start, end, 0) for start, end in split_ranges(total_size, num_threads)]
+                self._multi_thread(session, url, dest_path, temp_path, total_size, ranges)
         finally:
             session.close()
 
@@ -147,62 +244,117 @@ class FileDownloader:
 
     # -- estrategias --------------------------------------------------------
 
-    def _multi_thread(self, session, url, dest_path, temp_path, total_size, num_threads):
+    def _multi_thread(self, session, url, dest_path, temp_path, total_size, ranges):
+        """
+        Descarga por rangos. `ranges` es [(inicio, fin, ya_descargado)].
+
+        Se persiste `flushed`, no `downloaded`: sólo los bytes que ya han salido
+        del buffer de Python cuentan como recuperables. Guardar de más haría que
+        al reanudar se saltaran bytes nunca escritos, y el .pkg resultante sería
+        corrupto pasando por completo.
+        """
+        num_threads = len(ranges)
         lock = threading.Lock()
-        downloaded_bytes = [0] * num_threads
+        downloaded_bytes = [done for _, _, done in ranges]
+        flushed_bytes = [done for _, _, done in ranges]
+        plain_ranges = [(start, end) for start, end, _ in ranges]
         part_errors = []
+        stop = threading.Event()
 
-        with open(temp_path, 'wb') as f:
-            f.truncate(total_size)
+        if not os.path.exists(temp_path) or os.path.getsize(temp_path) != total_size:
+            with open(temp_path, 'wb') as f:
+                f.truncate(total_size)
 
-        def download_part(thread_id, start, end):
-            headers = {'Range': f'bytes={start}-{end}'}
+        def download_part(thread_id, start, end, already):
+            begin = start + already
+            if begin > end:
+                return  # este rango ya estaba completo
+            headers = {'Range': f'bytes={begin}-{end}'}
             try:
                 with session.get(url, headers=headers, stream=True, timeout=20) as r:
                     r.raise_for_status()
-                    current_pos = start
+                    current_pos = begin
+                    last_flush = begin
                     with open(temp_path, 'r+b') as f:
                         f.seek(current_pos)
                         for chunk in r.iter_content(chunk_size=131072):
+                            if stop.is_set():
+                                break
                             self.check_control()
-                            if chunk:
-                                f.write(chunk)
-                                current_pos += len(chunk)
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            current_pos += len(chunk)
+                            with lock:
+                                downloaded_bytes[thread_id] = current_pos - start
+                            if current_pos - last_flush >= FLUSH_INTERVAL_BYTES:
+                                f.flush()
+                                last_flush = current_pos
                                 with lock:
-                                    downloaded_bytes[thread_id] = current_pos - start
+                                    flushed_bytes[thread_id] = current_pos - start
+                        f.flush()
+                        with lock:
+                            flushed_bytes[thread_id] = current_pos - start
             except Exception as e:
                 with lock:
                     part_errors.append(e)
 
         threads = []
-        for i, (start, end) in enumerate(split_ranges(total_size, num_threads)):
-            t = threading.Thread(target=download_part, args=(i, start, end), daemon=True)
+        for i, (start, end, already) in enumerate(ranges):
+            t = threading.Thread(target=download_part, args=(i, start, end, already), daemon=True)
             threads.append(t)
             t.start()
 
         filename = os.path.basename(dest_path)
         last_time = time.time()
-        last_total = 0
-        while any(t.is_alive() for t in threads):
-            self.check_control()
-            time.sleep(PROGRESS_INTERVAL_SECONDS)
-            with lock:
-                current_total = sum(downloaded_bytes)
+        last_total = sum(downloaded_bytes)
+        last_state_save = time.time()
 
-            now = time.time()
-            elapsed = now - last_time
-            if elapsed >= PROGRESS_INTERVAL_SECONDS:
-                self._report(current_total, total_size,
-                             (current_total - last_total) / elapsed, num_threads, filename)
-                last_total = current_total
-                last_time = now
+        def persistir():
+            with lock:
+                instantanea = list(flushed_bytes)
+            save_part_state(temp_path, url, total_size, plain_ranges, instantanea)
+
+        try:
+            while any(t.is_alive() for t in threads):
+                self.check_control()
+                time.sleep(PROGRESS_INTERVAL_SECONDS)
+                with lock:
+                    current_total = sum(downloaded_bytes)
+
+                now = time.time()
+                elapsed = now - last_time
+                if elapsed >= PROGRESS_INTERVAL_SECONDS:
+                    self._report(current_total, total_size,
+                                 (current_total - last_total) / elapsed, num_threads, filename)
+                    last_total = current_total
+                    last_time = now
+                if now - last_state_save >= PART_STATE_INTERVAL_SECONDS:
+                    persistir()
+                    last_state_save = now
+        except BaseException:
+            # Pausa, cancelación o cierre: hay que parar a los hilos y dejar
+            # constancia de por dónde iban antes de soltar el control.
+            stop.set()
+            for t in threads:
+                t.join(timeout=PART_JOIN_TIMEOUT_SECONDS)
+            persistir()
+            raise
 
         for t in threads:
             t.join()
 
         if part_errors:
+            persistir()
             raise part_errors[0]
 
+        if sum(flushed_bytes) < total_size:
+            persistir()
+            raise OSError(
+                f"Descarga incompleta: {sum(flushed_bytes)} de {total_size} bytes"
+            )
+
+        clear_part_state(temp_path)
         os.replace(temp_path, dest_path)
         self.on_progress(1.0, "", num_threads)
         self.on_status(f"✅ Finalizado: {filename}")
@@ -259,6 +411,10 @@ __all__ = [
     "MIN_BYTES_PER_THREAD",
     "build_download_session",
     "calculate_sha256",
+    "clear_part_state",
+    "load_part_state",
+    "part_state_path",
+    "save_part_state",
     "plan_thread_count",
     "split_ranges",
 ]
