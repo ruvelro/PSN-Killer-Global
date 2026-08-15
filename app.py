@@ -88,7 +88,8 @@ CATALOG_STATE_META_KEY = "_meta"
 DATABASE_TSV_BASE_URL = "https://raw.githubusercontent.com/ruvelro/PSN-Killer-Database/main/data"
 NPS_TSV_BASE_URL = "https://nopaystation.com/tsv"
 VITAWIKI_TSV_BASE_URL = "https://vitawiki.xyz/free"
-CATALOG_PARSER_VERSION = "2"
+CATALOG_PARSER_VERSION = "3"
+CATALOG_DB_SCHEMA_VERSION = 2
 
 # URL directa al pack de licencias
 GITHUB_RAP_URL = "https://github.com/TheWizWikii/PS3-Stuff-Repository/releases/download/3/License_Pack_31.153.pkg"
@@ -1352,11 +1353,17 @@ class PSNDownloaderApp(ctk.CTk):
         with sqlite3.connect(CATALOG_DB_PATH) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             user_version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if user_version > 1:
+            if user_version > CATALOG_DB_SCHEMA_VERSION:
                 logging.warning("SQLite schema más nuevo de lo esperado: %s", user_version)
+            elif 0 < user_version < CATALOG_DB_SCHEMA_VERSION:
+                # La UNIQUE del esquema 1 no coincidía con catalog_item_key y
+                # descartaba elementos al guardar. Se reconstruye desde los TSV.
+                logging.info("Migrando esquema SQLite %s -> %s", user_version, CATALOG_DB_SCHEMA_VERSION)
+                conn.execute("DROP TABLE IF EXISTS catalog_items")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS catalog_items (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_key TEXT NOT NULL UNIQUE,
                     platform TEXT NOT NULL,
                     category TEXT NOT NULL,
                     title_id TEXT,
@@ -1372,11 +1379,10 @@ class PSNDownloaderApp(ctk.CTk):
                     required_fw TEXT,
                     original_name TEXT,
                     item_type TEXT,
-                    normalized_name TEXT,
-                    UNIQUE(platform, category, title_id, version, url)
+                    normalized_name TEXT
                 )
             """)
-            conn.execute("PRAGMA user_version=1")
+            conn.execute(f"PRAGMA user_version={CATALOG_DB_SCHEMA_VERSION}")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_catalog_platform_category ON catalog_items(platform, category)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_catalog_title_id ON catalog_items(title_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_catalog_normalized_name ON catalog_items(normalized_name)")
@@ -1427,6 +1433,7 @@ class PSNDownloaderApp(ctk.CTk):
                 for category, items in categories.items():
                     for item in items:
                         rows.append((
+                            self.catalog_item_tag(item),
                             platform, category, item.title_id, item.region, item.name, item.version,
                             item.size, parse_size_to_bytes(item.size), item.url, item.content_id,
                             item.license_value, item.sha256, item.required_fw, item.original_name,
@@ -1434,10 +1441,11 @@ class PSNDownloaderApp(ctk.CTk):
                         ))
             conn.executemany("""
                 INSERT OR REPLACE INTO catalog_items (
+                    item_key,
                     platform, category, title_id, region, name, version, size, size_bytes,
                     url, content_id, license_value, sha256, required_fw, original_name,
                     item_type, normalized_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, rows)
             conn.execute(
                 "INSERT OR REPLACE INTO catalog_meta(key, value) VALUES('tsv_metadata', ?)",
