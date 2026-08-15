@@ -1,6 +1,6 @@
 # 🎮 PSN Killer Global
 
-Versión actual: **0.3.0**
+Versión actual: **0.4.0**
 
 Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTkinter** diseñada para buscar, filtrar y descargar contenido oficial de PlayStation de forma masiva y a alta velocidad (juegos, actualizaciones, demos, temas, avatares, DLCs y licencias).
 
@@ -23,9 +23,9 @@ Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTki
 * **📦 Descarga Completa Multi-Juego:** Permite seleccionar varios juegos y revisar, uno a uno, base, última update, DLCs, temas y avatares antes de añadirlos a la cola.
 * **📚 Biblioteca de Descargas:** Muestra juegos descargados por plataforma, estado de base/update, contenido adicional presente y carpeta de destino.
 * **⏯️ Cola de Descargas:** Lista tareas pendientes o activas con progreso, velocidad, pausa, reanudación, cancelación y reintento.
-* **💿 Cola Persistente y Reanudación:** Guarda `download_queue.json` y usa archivos `.part` para continuar descargas parciales cuando el servidor admite rangos.
+* **💿 Cola Persistente y Reanudación:** Guarda `download_queue.json` y usa archivos `.part` para continuar descargas parciales. La reanudación funciona también en multihilo: si pausas o cierras, cada rango retoma donde iba en vez de empezar de cero.
 * **✅ Verificación SHA256:** Si el catálogo incluye hash, valida el archivo al terminar y lo marca como verificado o corrupto.
-* **🔄 Actualizador de Catálogos:** Puede refrescar los TSV desde URLs configurables, guardando backup local y fecha de actualización.
+* **🔄 Actualizador de Catálogos:** Refresca los TSV desde URLs configurables, guardando backup local y fecha. Si la fuente publica `catalog_manifest.json`, verifica el SHA256 de cada catálogo antes de instalarlo.
 * **🗄️ SQLite Local:** Indexa los catálogos en `data/catalog.sqlite3` y reconstruye la base cuando cambian los TSV.
 * **🧩 Completar Biblioteca:** Analiza lo que ya hay en `Descargas/` y propone contenido relacionado pendiente.
 * **📋 Faltantes Global:** Lista por plataforma todos los juegos con contenido pendiente y permite descargarlo en lote.
