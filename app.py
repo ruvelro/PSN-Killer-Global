@@ -62,6 +62,8 @@ import hashlib
 import shutil
 import logging
 import sqlite3
+import contextlib
+from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -107,12 +109,30 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(CATALOG_BACKUP_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
-logging.basicConfig(
-    filename=LOG_PATH,
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    encoding="utf-8"
+# Rotación: sin ella logs/app.log crecía indefinidamente, y el motor de descarga
+# escribe una línea por cada archivo y cada cambio de estado.
+_log_handler = RotatingFileHandler(
+    LOG_PATH, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
 )
+_log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_log_handler])
+
+
+@contextlib.contextmanager
+def catalog_db():
+    """
+    Conexión a la base de catálogos que además se cierra.
+
+    `with sqlite3.connect(...)` solo hace commit o rollback: deja la conexión
+    abierta hasta que pase el recolector, y record_history abre una por cada
+    descarga y cada verificación.
+    """
+    conn = sqlite3.connect(CATALOG_DB_PATH)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 @dataclass
@@ -593,6 +613,7 @@ class PSNDownloaderApp(ctk.CTk):
         self.download_entries_cache = None
         self.queue_state_saved_at = 0.0
         self.queue_refresh_pending = False
+        self.catalog_db_ready = False
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.create_ui()
@@ -1386,7 +1407,11 @@ class PSNDownloaderApp(ctk.CTk):
         return metadata
 
     def init_catalog_db(self):
-        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+        # El esquema no cambia durante la ejecución. Antes, record_history
+        # relanzaba 4 CREATE TABLE y 3 CREATE INDEX por cada descarga.
+        if self.catalog_db_ready:
+            return
+        with catalog_db() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             user_version = conn.execute("PRAGMA user_version").fetchone()[0]
             if user_version > CATALOG_DB_SCHEMA_VERSION:
@@ -1440,13 +1465,14 @@ class PSNDownloaderApp(ctk.CTk):
                     details TEXT
                 )
             """)
+        self.catalog_db_ready = True
 
     def catalog_db_is_current(self):
         if not os.path.exists(CATALOG_DB_PATH):
             return False
         self.init_catalog_db()
         current = self.catalog_files_metadata()
-        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+        with catalog_db() as conn:
             row = conn.execute("SELECT value FROM catalog_meta WHERE key='tsv_metadata'").fetchone()
             parser_row = conn.execute("SELECT value FROM catalog_meta WHERE key='parser_version'").fetchone()
             count = conn.execute("SELECT COUNT(*) FROM catalog_items").fetchone()[0]
@@ -1462,7 +1488,7 @@ class PSNDownloaderApp(ctk.CTk):
     def save_catalog_to_db(self):
         self.init_catalog_db()
         metadata = self.catalog_files_metadata()
-        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+        with catalog_db() as conn:
             conn.execute("DELETE FROM catalog_items")
             rows = []
             for platform, categories in self.catalog.items():
@@ -1500,7 +1526,7 @@ class PSNDownloaderApp(ctk.CTk):
     def load_catalog_from_db(self):
         self.init_catalog_db()
         self.reset_catalog()
-        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+        with catalog_db() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("""
                 SELECT platform, category, title_id, region, name, version, size, url,
@@ -1528,7 +1554,7 @@ class PSNDownloaderApp(ctk.CTk):
 
     def record_history(self, action, platform="", category="", name="", status="", details=None):
         self.init_catalog_db()
-        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+        with catalog_db() as conn:
             conn.execute(
                 """
                 INSERT INTO action_history(created_at, action, platform, category, name, status, details)
@@ -1548,7 +1574,7 @@ class PSNDownloaderApp(ctk.CTk):
 
     def history_report_rows(self, limit=500):
         self.init_catalog_db()
-        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+        with catalog_db() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("""
                 SELECT created_at, action, platform, category, name, status, details
@@ -1580,7 +1606,7 @@ class PSNDownloaderApp(ctk.CTk):
         if not messagebox.askyesno("Limpiar historial", "¿Quieres borrar todo el historial de acciones?"):
             return
         self.init_catalog_db()
-        with sqlite3.connect(CATALOG_DB_PATH) as conn:
+        with catalog_db() as conn:
             conn.execute("DELETE FROM action_history")
         self.refresh_history_view()
         self.status_label.configure(text="Historial limpiado")
