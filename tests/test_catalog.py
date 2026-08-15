@@ -8,10 +8,16 @@ class TestRegion:
     @pytest.mark.parametrize("title_id,region", [
         ("BLUS30109", "US"), ("BCUS98111", "US"), ("NPUB30740", "US"),
         ("BLES00483", "EU"), ("BCES00065", "EU"), ("NPEB00219", "EU"),
-        ("BLJS10001", "ASIA"), ("NPJB00123", "ASIA"), ("BCAS20001", "ASIA"),
+        ("BLJS10001", "JP"), ("NPJB00123", "JP"), ("BCJS30001", "JP"),
+        ("BCAS20001", "ASIA"), ("NPHA80001", "ASIA"), ("BLAS50001", "ASIA"),
     ])
     def test_prefijos_conocidos(self, title_id, region):
         assert app.auto_detect_region(title_id) == region
+
+    def test_japones_y_asiatico_se_distinguen(self):
+        """Los catalogos usan JP para los japoneses; antes ambos daban ASIA."""
+        assert app.auto_detect_region("BLJS10001") == "JP"
+        assert app.auto_detect_region("NPHA80001") == "ASIA"
 
     @pytest.mark.parametrize("title_id", ["XXXX00000", "", "AB"])
     def test_desconocido_es_all(self, title_id):
@@ -23,6 +29,9 @@ class TestRegion:
     @pytest.mark.parametrize("base,candidato,compatible", [
         ("EU", "EU", True), ("EU", "ALL", True), ("EU", "FREE", True),
         ("EU", "INT", True), ("EU", "US", False), ("", "US", True),
+        # Los catalogos etiquetan el mismo contenido japones como JP o ASIA.
+        ("JP", "ASIA", True), ("ASIA", "JP", True),
+        ("JP", "US", False), ("ASIA", "EU", False),
     ])
     def test_compatibilidad(self, base, candidato, compatible):
         assert app.compatible_region(base, candidato) is compatible

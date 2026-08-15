@@ -105,7 +105,14 @@ def format_total_size(bytes_num):
 # --------------------------------------------------------------------------
 
 def auto_detect_region(tid):
-    """Detecta la región del juego basándose en el prefijo del Title ID."""
+    """
+    Detecta la región del juego basándose en el prefijo del Title ID.
+
+    Sólo se usa cuando el TSV no trae columna de región. Los prefijos japoneses
+    dan 'JP', que es lo que usan los propios catálogos (5.322 filas frente a
+    1.305 como 'ASIA'); 'ASIA' queda para los prefijos asiáticos NPH*/BLAS*.
+    Antes ambos daban 'ASIA', que contradecía al catálogo.
+    """
     tid = (tid or "").upper()
     if len(tid) >= 4:
         code = tid[:4]
@@ -114,16 +121,28 @@ def auto_detect_region(tid):
         elif code.startswith(('BCES', 'BLES', 'NPEA', 'NPEB', 'NPEG', 'NPEZ', 'EP')):
             return 'EU'
         elif code.startswith(('BCJS', 'BLJS', 'NPJA', 'NPJB', 'NPJH', 'JP')):
-            return 'ASIA'
+            return 'JP'
         elif code.startswith(('BCAS', 'BLAS', 'NPHA', 'NPHB', 'HP')):
             return 'ASIA'
     return 'ALL'
 
 
+# Los catálogos no son consistentes entre sí: el mismo contenido japonés
+# aparece unas veces como JP y otras como ASIA. Se tratan como equivalentes
+# para no perder emparejamientos por una diferencia de etiquetado.
+EQUIVALENT_REGIONS = [{"JP", "ASIA"}]
+WILDCARD_REGIONS = {"ALL", "FREE", "INT"}
+
+
 def compatible_region(base_region, candidate_region):
     if not base_region or not candidate_region:
         return True
-    return candidate_region in {base_region, "ALL", "FREE", "INT"}
+    if candidate_region in WILDCARD_REGIONS or candidate_region == base_region:
+        return True
+    return any(
+        base_region in grupo and candidate_region in grupo
+        for grupo in EQUIVALENT_REGIONS
+    )
 
 
 def split_name_and_version(raw_name, default_ver="Base"):

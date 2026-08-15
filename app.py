@@ -7,6 +7,7 @@ lo que reporta el motor de descarga a la interfaz.
 """
 import contextlib
 import csv
+import hashlib
 import json
 import logging
 import os
@@ -125,6 +126,8 @@ CATALOG_DB_PATH = os.path.join(DATA_DIR, "catalog.sqlite3")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 LOG_PATH = os.path.join(LOG_DIR, "app.log")
 CATALOG_STATE_META_KEY = "_meta"
+# Publicado por PSN-Killer-Database junto a los TSV: trae el SHA256 de cada uno.
+CATALOG_MANIFEST_NAME = "catalog_manifest.json"
 DATABASE_TSV_BASE_URL = "https://raw.githubusercontent.com/ruvelro/PSN-Killer-Database/main/data"
 NPS_TSV_BASE_URL = "https://nopaystation.com/tsv"
 VITAWIKI_TSV_BASE_URL = "https://vitawiki.xyz/free"
@@ -560,7 +563,8 @@ class PSNDownloaderApp(ctk.CTk):
 
         self.region_combo = ctk.CTkComboBox(
             search_frame,
-            values=["TODAS", "EU", "US", "JP", "ASIA", "INT", "ALL", "FREE"],
+            # UNKNOWN existe en los catálogos: sin él, esas filas no se podían filtrar.
+            values=["TODAS", "EU", "US", "JP", "ASIA", "INT", "ALL", "FREE", "UNKNOWN"],
             width=100,
             command=self.filter_tables
         )
@@ -1309,11 +1313,44 @@ class PSNDownloaderApp(ctk.CTk):
             state[CATALOG_STATE_META_KEY] = meta
             self.save_catalog_state(state)
 
+    def fetch_catalog_manifest(self):
+        """
+        Descarga el manifiesto de la fuente primaria, si lo publica.
+
+        PSN-Killer-Database publica un catalog_manifest.json con el SHA256 de
+        cada TSV. Comprobarlo da integridad real, en vez de la heurística de
+        "¿tiene filas con URL y no ha encogido demasiado?".
+        """
+        base_url = self.app_config.get("catalog_primary_base_url", DATABASE_TSV_BASE_URL)
+        if not isinstance(base_url, str) or not base_url.strip():
+            return {}
+        url = f"{base_url.rstrip('/')}/{CATALOG_MANIFEST_NAME}"
+        try:
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError) as e:
+            # No todas las fuentes lo publican; se sigue con la validación normal.
+            logging.info("Sin manifiesto de catálogos en %s: %s", url, e)
+            return {}
+
+        catalogs = data.get("catalogs")
+        if not isinstance(catalogs, dict):
+            return {}
+        return {
+            name: entry.get("sha256")
+            for name, entry in catalogs.items()
+            if isinstance(entry, dict) and valid_sha256(entry.get("sha256", ""))
+        }
+
     def _update_catalogs_worker(self, sources):
         updated = []
         failed = []
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         state = self.load_catalog_state()
+        expected_hashes = self.fetch_catalog_manifest()
+        if expected_hashes:
+            logging.info("Manifiesto con %d hash(es) de catálogo", len(expected_hashes))
 
         known_files = {
             file_name: (platform, category)
@@ -1350,6 +1387,19 @@ class PSNDownloaderApp(ctk.CTk):
                     response.raise_for_status()
                     with open(temp_path, "wb") as f:
                         f.write(response.content)
+
+                    # Si la fuente publica hash, manda sobre la heurística: es
+                    # la única comprobación que detecta una descarga truncada
+                    # o alterada que por lo demás parece un TSV válido.
+                    expected = expected_hashes.get(safe_name)
+                    actual = hashlib.sha256(response.content).hexdigest() if expected else ""
+                    if expected and actual != expected:
+                        last_error = f"{url}: SHA256 no coincide con el manifiesto"
+                        os.remove(temp_path)
+                        logging.warning("Catálogo rechazado %s desde %s: SHA256 esperado=%s real=%s",
+                                        safe_name, url, expected, actual)
+                        continue
+
                     valid, parsed, reason = self.validate_catalog_file(temp_path, platform, category, current_count)
                     if not valid:
                         last_error = f"{url}: {reason}"
@@ -1365,6 +1415,8 @@ class PSNDownloaderApp(ctk.CTk):
                         "backup": backup_path if os.path.exists(backup_path) else "",
                         "bytes": len(response.content),
                         "rows": parsed,
+                        "sha256": actual,
+                        "sha256_verified": bool(expected),
                     }
                     updated.append(safe_name)
                     self.record_history("catalog_update", platform, category, safe_name, "updated", {"source": url, "rows": parsed})
