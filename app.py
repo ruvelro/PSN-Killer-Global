@@ -502,6 +502,7 @@ class PSNDownloaderApp(ctk.CTk):
         self.running_task_ids = set()
         self.catalog_loading = False
         self.catalog_update_running = False
+        self.ui_closed = False
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.create_ui()
@@ -626,7 +627,31 @@ class PSNDownloaderApp(ctk.CTk):
             self.save_queue_state()
         except OSError as e:
             logging.exception("No se pudo guardar la cola al cerrar: %s", e)
+        # A partir de aquí los hilos de descarga ya no pueden tocar la interfaz.
+        self.ui_closed = True
         self.destroy()
+
+    def ui(self, func, *args, **kwargs):
+        """
+        Ejecuta una actualización de interfaz en el hilo principal de Tk.
+
+        Tkinter no es thread-safe: llamar a un widget desde un hilo de descarga
+        provoca 'main thread is not in main loop' o cierres inesperados. Todo el
+        código que corre fuera del hilo principal debe pasar por aquí.
+        """
+        if self.ui_closed:
+            return
+        try:
+            self.after(0, lambda: func(*args, **kwargs))
+        except RuntimeError:
+            # La ventana ya se está destruyendo; descartamos la actualización.
+            self.ui_closed = True
+
+    def set_status(self, message):
+        self.status_label.configure(text=message)
+
+    def set_progress(self, value):
+        self.progress_bar.set(max(0.0, min(1.0, value)))
 
     def set_busy_state(self, message):
         self.status_label.configure(text=message)
@@ -3189,14 +3214,14 @@ class PSNDownloaderApp(ctk.CTk):
                 self._single_thread_download(session, url, dest_path, title, total_size, task)
                 if base_item and manifest_item and game_key:
                     final_status = self.verify_download_integrity(base_item, manifest_item, game_key, dest_path)
-                    self.refresh_downloads_view()
+                    self.ui(self.refresh_downloads_view)
                     if final_status == "corrupt":
                         if task:
                             task.status = "corrupt"
                             task.progress = 1.0
                             task.error = "SHA256 no coincide"
-                            self.refresh_queue_view()
-                        self.status_label.configure(text=f"Corrupto: {os.path.basename(dest_path)}")
+                            self.ui(self.refresh_queue_view)
+                        self.ui(self.set_status, f"Corrupto: {os.path.basename(dest_path)}")
                         return
                 self.complete_task(task)
                 return
@@ -3255,11 +3280,12 @@ class PSNDownloaderApp(ctk.CTk):
                     speed_str = format_speed(speed)
                     percent = current_total / total_size if total_size > 0 else 0
                     
-                    self.progress_bar.set(min(1.0, percent))
+                    self.ui(self.set_progress, percent)
                     self.update_task_progress(task, percent, speed_str)
                     display_filename = os.path.basename(dest_path)
-                    self.status_label.configure(
-                        text=f"Descargando (Turbo 16H): {display_filename}... [{speed_str}]"
+                    self.ui(
+                        self.set_status,
+                        f"Descargando ({num_threads} hilos): {display_filename}... [{speed_str}]"
                     )
 
                     last_total_downloaded = current_total
@@ -3272,18 +3298,18 @@ class PSNDownloaderApp(ctk.CTk):
                 raise part_errors[0]
 
             os.replace(temp_path, dest_path)
-            self.progress_bar.set(1.0)
-            self.status_label.configure(text=f"✅ Finalizado: {os.path.basename(dest_path)}")
+            self.ui(self.set_progress, 1.0)
+            self.ui(self.set_status, f"✅ Finalizado: {os.path.basename(dest_path)}")
             if base_item and manifest_item and game_key:
                 final_status = self.verify_download_integrity(base_item, manifest_item, game_key, dest_path)
-                self.refresh_downloads_view()
+                self.ui(self.refresh_downloads_view)
                 if final_status == "corrupt":
                     if task:
                         task.status = "corrupt"
                         task.progress = 1.0
                         task.error = "SHA256 no coincide"
-                        self.refresh_queue_view()
-                    self.status_label.configure(text=f"Corrupto: {os.path.basename(dest_path)}")
+                        self.ui(self.refresh_queue_view)
+                    self.ui(self.set_status, f"Corrupto: {os.path.basename(dest_path)}")
                     return
             self.complete_task(task)
             logging.info("Descarga completada: %s", dest_path)
@@ -3293,19 +3319,20 @@ class PSNDownloaderApp(ctk.CTk):
             self.fail_task(task, e)
             logging.info("Descarga cancelada: %s", dest_path)
             self.record_history("download", task.platform if task else "", task.category if task else "", title, "cancelled", {"path": dest_path})
-            self.status_label.configure(text=f"Cancelado: {os.path.basename(dest_path)}")
+            self.ui(self.set_status, f"Cancelado: {os.path.basename(dest_path)}")
             if base_item and manifest_item and game_key:
                 self.register_manifest_entry(base_item, manifest_item, game_key, dest_path, "cancelled")
-                self.refresh_downloads_view()
+                self.ui(self.refresh_downloads_view)
         except Exception as e:
-            self.status_label.configure(text="❌ Error en la descarga")
+            self.ui(self.set_status, "❌ Error en la descarga")
             self.fail_task(task, e)
             logging.exception("Error descargando %s: %s", title, e)
             self.record_history("download", task.platform if task else "", task.category if task else "", title, "error", {"path": dest_path, "error": str(e)})
             if base_item and manifest_item and game_key:
                 self.register_manifest_entry(base_item, manifest_item, game_key, dest_path, "error")
-                self.refresh_downloads_view()
-            messagebox.showerror("Error de Descarga", f"No se pudo descargar {title}:\n{e}")
+                self.ui(self.refresh_downloads_view)
+            # El diálogo se abre en el hilo principal: si no, bloquea la descarga y rompe Tk.
+            self.ui(messagebox.showerror, "Error de Descarga", f"No se pudo descargar {title}:\n{e}")
 
     def _single_thread_download(self, session, url, dest_path, title, total_size, task=None):
         start_time = time.time()
@@ -3320,7 +3347,7 @@ class PSNDownloaderApp(ctk.CTk):
             headers["Range"] = f"bytes={resume_from}-"
         elif resume_from and total_size and resume_from >= total_size:
             os.replace(temp_path, dest_path)
-            self.progress_bar.set(1.0)
+            self.ui(self.set_progress, 1.0)
             self.update_task_progress(task, 1.0, "")
             return
 
@@ -3345,19 +3372,20 @@ class PSNDownloaderApp(ctk.CTk):
                             
                             if total_size > 0:
                                 progress = min(1.0, downloaded_bytes / total_size)
-                                self.progress_bar.set(progress)
+                                self.ui(self.set_progress, progress)
                                 self.update_task_progress(task, progress, speed_str)
 
-                            self.status_label.configure(
-                                text=f"Descargando: {os.path.basename(dest_path)}... [{speed_str}]"
+                            self.ui(
+                                self.set_status,
+                                f"Descargando: {os.path.basename(dest_path)}... [{speed_str}]"
                             )
                             last_bytes = downloaded_bytes
                             last_time = now
 
         os.replace(temp_path, dest_path)
-        self.progress_bar.set(1.0)
+        self.ui(self.set_progress, 1.0)
         self.update_task_progress(task, 1.0, "")
-        self.status_label.configure(text=f"✅ Finalizado: {os.path.basename(dest_path)}")
+        self.ui(self.set_status, f"✅ Finalizado: {os.path.basename(dest_path)}")
 
 
 PS3DownloaderApp = PSNDownloaderApp
