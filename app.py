@@ -93,19 +93,10 @@ CATALOG_PARSER_VERSION = "2"
 # URL directa al pack de licencias
 GITHUB_RAP_URL = "https://github.com/TheWizWikii/PS3-Stuff-Repository/releases/download/3/License_Pack_31.153.pkg"
 
-CARPETAS = {
-    "Juegos": os.path.join(DOWNLOADS_DIR, "Juegos"),
-    "Updates": os.path.join(DOWNLOADS_DIR, "Updates"),
-    "Demos": os.path.join(DOWNLOADS_DIR, "Demos"),
-    "Temas": os.path.join(DOWNLOADS_DIR, "Temas"),
-    "Avatares": os.path.join(DOWNLOADS_DIR, "Avatares"),
-    "DLCs": os.path.join(DOWNLOADS_DIR, "DLCs"),
-    "RAP": os.path.join(BASE_DIR, "Keys_RAP")
-}
+# El contenido se organiza en Descargas/<plataforma>/<Juego [TITLE_ID]>/<categoría>/
+# y las carpetas se crean bajo demanda. Solo las licencias RAP tienen destino fijo.
+RAP_DIR = os.path.join(BASE_DIR, "Keys_RAP")
 
-# Crear carpetas de destino automáticamente
-for folder in CARPETAS.values():
-    os.makedirs(folder, exist_ok=True)
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(CATALOG_BACKUP_DIR, exist_ok=True)
@@ -163,15 +154,55 @@ class DownloadCancelled(Exception):
     pass
 
 
-def sanitize_filename(filename):
+# Nombres de dispositivo reservados en Windows: no se pueden usar como archivo
+# ni como carpeta, ni siquiera con extensión (CON.pkg también falla).
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+MAX_NAME_LENGTH = 100
+# Windows limita a 260 caracteres salvo que se active el soporte de rutas largas.
+MAX_PATH_LENGTH = 240 if os.name == "nt" else 4096
+
+
+def sanitize_filename(filename, max_length=MAX_NAME_LENGTH):
     r"""
-    Limpia el nombre del archivo para que sea válido en Windows/Linux/macOS.
-    Elimina caracteres no permitidos como : \ / * ? " < > |
+    Limpia el nombre para que sea válido en Windows, Linux y macOS.
+
+    Además de los caracteres prohibidos (: \ / | ? * " < >) elimina caracteres
+    de control, recorta puntos y espacios finales (Windows los quita en silencio,
+    dejando la ruta del manifest sin corresponder con la del disco) y escapa los
+    nombres de dispositivo reservados.
     """
-    filename = re.sub(r'[:\\/|]', ' -', filename)
+    filename = re.sub(r'[:\\/|]', ' -', filename or "")
     filename = re.sub(r'[?*"<>]', '', filename)
+    filename = re.sub(r'[\x00-\x1f\x7f]', '', filename)
     filename = re.sub(r'\s+', ' ', filename).strip()
-    return filename
+    filename = filename[:max_length].strip().rstrip(". ")
+    if filename.split(".")[0].upper() in WINDOWS_RESERVED_NAMES:
+        filename = f"_{filename}"
+    return filename or "sin_nombre"
+
+
+def clamp_path_length(dest_path):
+    """
+    Recorta el nombre del archivo si la ruta completa supera el límite del sistema.
+
+    Se añade un hash corto del nombre original para que dos títulos largos que
+    comparten prefijo no colapsen en la misma ruta.
+    """
+    if len(dest_path) <= MAX_PATH_LENGTH:
+        return dest_path
+
+    directory, filename = os.path.split(dest_path)
+    stem, ext = os.path.splitext(filename)
+    digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()[:8]
+    available = MAX_PATH_LENGTH - len(directory) - len(os.sep) - len(ext) - len(digest) - 1
+    if available < 1:
+        logging.warning("Ruta demasiado larga y no recortable: %s", dest_path)
+        return dest_path
+    return os.path.join(directory, f"{stem[:available].strip()}~{digest}{ext}")
 
 
 def auto_detect_region(tid):
@@ -448,6 +479,12 @@ def item_filename(item):
     if item.version and item.version.lower() not in ["base", "n/a", "none"]:
         return f"{clean_title} {item.version}.pkg"
     return f"{clean_title}.pkg"
+
+
+def game_key_for(item):
+    """Identificador de carpeta de un juego. Debe ser estable: el manifest lo usa como clave."""
+    name = sanitize_filename(item.name)
+    return f"{name} [{item.title_id}]" if item.title_id else name
 
 
 def unique_path(dest_path):
@@ -2103,7 +2140,7 @@ class PSNDownloaderApp(ctk.CTk):
         return base_items
 
     def missing_related_content(self, base_item):
-        game_key = f"{sanitize_filename(base_item.name)} [{base_item.title_id}]"
+        game_key = game_key_for(base_item)
         existing_entries = [
             entry for entry in self.merged_download_entries().values()
             if entry.get("platform", "PS3") == base_item.platform and entry.get("game_key") == game_key
@@ -2369,7 +2406,7 @@ class PSNDownloaderApp(ctk.CTk):
                 if not item:
                     unmatched += 1
                     continue
-                game_key = f"{sanitize_filename(item.name)} [{item.title_id}]"
+                game_key = game_key_for(item)
                 dest_dir = os.path.join(DOWNLOADS_DIR, item.platform, game_key, category_folder(item.category))
                 os.makedirs(dest_dir, exist_ok=True)
                 src_path = os.path.join(root_dir, filename)
@@ -2390,7 +2427,7 @@ class PSNDownloaderApp(ctk.CTk):
         base_items = [self.tree_item_to_content(tree, item_id, "Juegos") for item_id in selected_items]
         related_groups = []
         for base_item in base_items:
-            game_key = f"{sanitize_filename(base_item.name)} [{base_item.title_id}]"
+            game_key = game_key_for(base_item)
             related_groups.append((base_item, game_key, self.find_related_content(base_item)))
 
         plural = "juego" if len(base_items) == 1 else "juegos"
@@ -2544,23 +2581,25 @@ class PSNDownloaderApp(ctk.CTk):
         update_selection_summary()
 
     def start_grouped_downloads(self, base_item, selected_items, game_key, refresh=True):
-        game_dir = os.path.join(DOWNLOADS_DIR, base_item.platform, game_key)
-        for folder in ["Base", "Updates", "DLCs", "Temas", "Avatares", "Demos"]:
-            os.makedirs(os.path.join(game_dir, folder), exist_ok=True)
+        entries = list(self.merged_download_entries().values())
+        queued = 0
 
         for item in selected_items:
             if not is_valid_download_url(item.url):
                 continue
-            dest_dir = os.path.join(game_dir, category_folder(item.category))
-            os.makedirs(dest_dir, exist_ok=True)
-            dest_path = unique_path(os.path.join(dest_dir, item_filename(item)))
+            if self.item_already_present(item, entries):
+                continue
+
+            dest_path = self.target_path_for(base_item, item, game_key)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
             clean_url = re.sub(r'(\.pkg)\d+$', r'\1', item.url, flags=re.IGNORECASE)
 
             self.register_manifest_entry(base_item, item, game_key, dest_path, "queued")
             self.enqueue_download(clean_url, dest_path, item.name, item.category, item.platform, base_item, item, game_key)
+            queued += 1
 
         if refresh:
-            self.status_label.configure(text=f"Descargas agrupadas añadidas a la cola: {len(selected_items)} elemento(s)")
+            self.status_label.configure(text=f"Descargas agrupadas añadidas a la cola: {queued} elemento(s)")
             self.refresh_downloads_view()
             self.refresh_queue_view()
 
@@ -2957,6 +2996,9 @@ class PSNDownloaderApp(ctk.CTk):
                 if not os.path.isdir(folder_path):
                     continue
 
+                # Disposición antigua y plana (Descargas/<plataforma>/<categoría>/x.pkg).
+                # Se sigue leyendo para no perder de vista lo ya descargado, aunque
+                # las descargas nuevas siempre van a la carpeta del juego.
                 if folder_name in DOWNLOAD_FOLDER_TO_CATEGORY:
                     category = DOWNLOAD_FOLDER_TO_CATEGORY[folder_name]
                     for filename in os.listdir(folder_path):
@@ -3176,15 +3218,43 @@ class PSNDownloaderApp(ctk.CTk):
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo abrir la carpeta de descargas:\n{e}")
 
+    def owning_game_item(self, item):
+        """
+        Devuelve el juego base al que pertenece un contenido.
+
+        Así una update o un DLC descargado desde su propia pestaña acaba en la
+        carpeta del juego, igual que si se hubiera pedido una descarga agrupada.
+        """
+        if item.category == "Juegos" or not item.title_id:
+            return item
+        games = self.catalog.get(item.platform, {}).get("Juegos", [])
+        return next((game for game in games if game.title_id == item.title_id), item)
+
+    def target_path_for(self, base_item, item, game_key):
+        """
+        Ruta de destino de un contenido dentro de la carpeta de su juego.
+
+        Si el manifest ya conoce una ruta para este elemento la reutiliza, de modo
+        que reintentar una descarga fallida sobrescriba el .part existente en vez
+        de ir creando "Juego (1).pkg", "Juego (2).pkg"...
+        """
+        entry = self.download_manifest.get(manifest_key(game_key, item))
+        if entry and entry.get("path"):
+            return entry["path"]
+
+        dest_dir = os.path.join(DOWNLOADS_DIR, base_item.platform, game_key, category_folder(item.category))
+        return clamp_path_length(unique_path(os.path.join(dest_dir, item_filename(item))))
+
     def start_download(self, tree, category):
         selected_items = tree.selection()
         if not selected_items:
             messagebox.showwarning("Atención", "Por favor selecciona uno o varios elementos para descargar.")
             return
 
-        target_dir = os.path.join(DOWNLOADS_DIR, self.current_platform, category_folder(category))
+        entries = list(self.merged_download_entries().values())
         queued_count = 0
         skipped_count = 0
+        present_count = 0
 
         for item_id in selected_items:
             item_values = tree.item(item_id)['values']
@@ -3198,27 +3268,39 @@ class PSNDownloaderApp(ctk.CTk):
             if not is_valid_download_url(item.url):
                 skipped_count += 1
                 continue
+            if self.item_already_present(item, entries):
+                present_count += 1
+                continue
 
-            clean_title = sanitize_filename(item.name)
-            custom_filename = item_filename(item)
-
-            dest_path = unique_path(os.path.join(target_dir, custom_filename))
+            base_item = self.owning_game_item(item)
+            game_key = game_key_for(base_item)
+            dest_path = self.target_path_for(base_item, item, game_key)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 
             clean_url = re.sub(r'(\.pkg)\d+$', r'\1', item.url, flags=re.IGNORECASE)
 
-            game_key = f"{sanitize_filename(item.name)} [{item.title_id}]"
-            self.register_manifest_entry(item, item, game_key, dest_path, "queued")
-            self.enqueue_download(clean_url, dest_path, clean_title, item.category, item.platform, item, item, game_key)
+            self.register_manifest_entry(base_item, item, game_key, dest_path, "queued")
+            self.enqueue_download(
+                clean_url, dest_path, sanitize_filename(item.name),
+                item.category, item.platform, base_item, item, game_key
+            )
             queued_count += 1
 
-        if skipped_count and not queued_count:
+        if skipped_count and not queued_count and not present_count:
             messagebox.showwarning("No disponible", "Los elementos seleccionados no tienen PKG descargable en el catálogo.")
-        elif skipped_count:
-            messagebox.showinfo("Descargas", f"Añadidos: {queued_count}\nNo disponibles omitidos: {skipped_count}")
+        elif skipped_count or present_count:
+            messagebox.showinfo(
+                "Descargas",
+                f"Añadidos: {queued_count}\n"
+                f"Ya descargados omitidos: {present_count}\n"
+                f"No disponibles omitidos: {skipped_count}"
+            )
+        self.refresh_downloads_view()
         self.status_label.configure(text=f"Elemento(s) añadido(s) a la cola: {queued_count}")
 
     def download_rap(self):
-        filename = os.path.join(CARPETAS["RAP"], "License_Pack_31.153.pkg")
+        os.makedirs(RAP_DIR, exist_ok=True)
+        filename = os.path.join(RAP_DIR, "License_Pack_31.153.pkg")
         self.enqueue_download(GITHUB_RAP_URL, filename, "Licencias (31.153 .pkg)", "RAP", "PS3")
         self.status_label.configure(text="Licencias añadidas a la cola")
 
