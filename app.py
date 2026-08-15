@@ -26,6 +26,7 @@ from tkinter import filedialog, messagebox, ttk
 import customtkinter as ctk
 import requests
 
+from psnkiller import APP_VERSION
 from psnkiller.catalog import (
     CONTENT_ORDER,
     GROUPED_DOWNLOAD_PLATFORMS,
@@ -121,7 +122,6 @@ CATALOG_BACKUP_DIR = os.path.join(DATA_DIR, "backups")
 CATALOG_DB_PATH = os.path.join(DATA_DIR, "catalog.sqlite3")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 LOG_PATH = os.path.join(LOG_DIR, "app.log")
-APP_VERSION = "0.2.0"
 CATALOG_STATE_META_KEY = "_meta"
 DATABASE_TSV_BASE_URL = "https://raw.githubusercontent.com/ruvelro/PSN-Killer-Database/main/data"
 NPS_TSV_BASE_URL = "https://nopaystation.com/tsv"

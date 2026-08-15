@@ -1,3 +1,4 @@
 """Núcleo de PSN Killer Global, sin dependencias de interfaz gráfica."""
 
-APP_VERSION = "0.2.0"
+# Fuente única de la versión: app.py y los lanzadores la leen de aquí.
+APP_VERSION = "0.3.0"

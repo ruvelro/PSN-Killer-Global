@@ -1,6 +1,6 @@
 # 🎮 PSN Killer Global
 
-Versión actual: **0.2.0**
+Versión actual: **0.3.0**
 
 Una aplicación de escritorio moderna desarrollada en **Python** con **CustomTkinter** diseñada para buscar, filtrar y descargar contenido oficial de PlayStation de forma masiva y a alta velocidad (juegos, actualizaciones, demos, temas, avatares, DLCs y licencias).
 
@@ -63,6 +63,32 @@ La aplicación opera mediante los siguientes componentes lógicos:
 ---
 
 ## 🚀 Instalación y Uso
+
+### Descarga directa (recomendado)
+
+Descarga el paquete de tu sistema desde la
+**[última release](https://github.com/ruvelro/PSN-Killer-Global/releases/latest)**,
+descomprímelo y ejecuta el lanzador. No hace falta cuenta de GitHub ni `git`.
+
+| Sistema | Archivo | Lanzador |
+|---|---|---|
+| Windows | `PSN-Killer-Global-<versión>-windows.zip` | `launch_windows.bat` |
+| macOS | `PSN-Killer-Global-<versión>-macos.zip` | `./launch_macos.sh` |
+| Linux | `PSN-Killer-Global-<versión>-linux.zip` | `./launch_linux.sh` |
+
+Cada release incluye `SHA256SUMS.txt` para comprobar la descarga:
+
+```bash
+sha256sum -c SHA256SUMS.txt
+```
+
+En macOS y Linux, si el lanzador no tiene permiso de ejecución:
+
+```bash
+chmod +x launch_macos.sh
+```
+
+### Desde el código fuente
 
 1. Clona este repositorio o descarga los archivos fuente.
 2. Ejecuta el lanzador de tu sistema:

@@ -6,39 +6,66 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   package:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            name: linux
-            launcher: launch_linux.sh
-          - os: macos-latest
-            name: macos
-            launcher: launch_macos.sh
-          - os: windows-latest
-            name: windows
-            launcher: launch_windows.bat
-    runs-on: ${{ matrix.os }}
+    # Los paquetes son código Python idéntico salvo el lanzador, así que uno
+    # solo los construye todos. No hace falta matriz de sistemas operativos.
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare artifact
+      - name: Construir los paquetes
         shell: bash
         run: |
-          mkdir -p "dist/PSN-Killer-Global-${{ matrix.name }}"
-          cp app.py clean_updates.py requirements.txt README.md LICENSE catalog_sources.example.json "dist/PSN-Killer-Global-${{ matrix.name }}/"
-          # El paquete psnkiller lleva toda la lógica: sin él la app no arranca.
-          cp -r psnkiller "dist/PSN-Killer-Global-${{ matrix.name }}/"
-          find "dist/PSN-Killer-Global-${{ matrix.name }}/psnkiller" -name '__pycache__' -type d -exec rm -rf {} +
-          cp "${{ matrix.launcher }}" "dist/PSN-Killer-Global-${{ matrix.name }}/"
-          mkdir -p "dist/PSN-Killer-Global-${{ matrix.name }}/data"
-          touch "dist/PSN-Killer-Global-${{ matrix.name }}/data/.gitkeep"
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
 
-      - name: Upload artifact
+          for target in linux:launch_linux.sh macos:launch_macos.sh windows:launch_windows.bat; do
+            name="${target%%:*}"
+            launcher="${target##*:}"
+            out="build/PSN-Killer-Global-${name}"
+
+            mkdir -p "$out/data"
+            cp app.py clean_updates.py requirements.txt requirements-dev.txt \
+               README.md LICENSE catalog_sources.example.json "$out/"
+            # El paquete psnkiller lleva toda la lógica: sin él la app no arranca.
+            cp -r psnkiller "$out/"
+            find "$out/psnkiller" -name '__pycache__' -type d -exec rm -rf {} +
+            cp "$launcher" "$out/"
+            chmod +x "$out/$launcher" 2>/dev/null || true
+            touch "$out/data/.gitkeep"
+
+            (cd build && zip -qr "../dist/PSN-Killer-Global-${version}-${name}.zip" "PSN-Killer-Global-${name}")
+          done
+
+          (cd dist && sha256sum *.zip > SHA256SUMS.txt)
+          ls -la dist
+
+      - name: Comprobar que el paquete arranca
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Sanity check: el paquete debe traer todo lo que importa app.py.
+          cd build/PSN-Killer-Global-linux
+          python -c "import psnkiller.catalog, psnkiller.downloader, psnkiller.naming, psnkiller.models; print('paquete completo')"
+
+      - name: Publicar la release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+
+      - name: Guardar como artefacto (ejecución manual)
+        if: "!startsWith(github.ref, 'refs/tags/v')"
         uses: actions/upload-artifact@v4
         with:
-          name: PSN-Killer-Global-${{ matrix.name }}
-          path: dist/PSN-Killer-Global-${{ matrix.name }}
+          name: PSN-Killer-Global
+          path: dist
