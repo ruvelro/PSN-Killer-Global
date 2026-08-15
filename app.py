@@ -92,6 +92,8 @@ CATALOG_PARSER_VERSION = "3"
 CATALOG_DB_SCHEMA_VERSION = 2
 # Espera tras la última tecla antes de refiltrar las tablas.
 FILTER_DEBOUNCE_MS = 250
+# Intervalo mínimo entre escrituras de download_queue.json por avance de progreso.
+QUEUE_SAVE_INTERVAL_SECONDS = 5.0
 
 # URL directa al pack de licencias
 GITHUB_RAP_URL = "https://github.com/TheWizWikii/PS3-Stuff-Repository/releases/download/3/License_Pack_31.153.pkg"
@@ -589,6 +591,8 @@ class PSNDownloaderApp(ctk.CTk):
         self.ui_closed = False
         self.filter_job = None
         self.download_entries_cache = None
+        self.queue_state_saved_at = 0.0
+        self.queue_refresh_pending = False
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.create_ui()
@@ -685,13 +689,41 @@ class PSNDownloaderApp(ctk.CTk):
         return task
 
     def save_queue_state(self):
+        """Persiste la cola ahora mismo. Para cambios de estado, que no se pueden perder."""
         with self.download_lock:
             data = {
                 "saved_at": datetime.now().isoformat(timespec="seconds"),
                 "tasks": [self.task_to_dict(self.download_tasks[task_id]) for task_id in self.download_order],
             }
-        with open(QUEUE_STATE_PATH, "w", encoding="utf-8") as f:
+        self.queue_state_saved_at = time.monotonic()
+        # Escritura atómica: un corte a mitad dejaba download_queue.json truncado
+        # y la cola entera se perdía al arrancar.
+        temp_path = f"{QUEUE_STATE_PATH}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(temp_path, QUEUE_STATE_PATH)
+
+    def save_queue_state_soon(self):
+        """
+        Persiste como mucho una vez cada QUEUE_SAVE_INTERVAL_SECONDS.
+
+        El progreso avanza 5 veces por segundo y por descarga; guardar en cada
+        tick reescribía la cola entera decenas de veces por segundo sin aportar
+        nada, porque lo único que cambia es un porcentaje.
+        """
+        if time.monotonic() - self.queue_state_saved_at >= QUEUE_SAVE_INTERVAL_SECONDS:
+            self.save_queue_state()
+
+    def request_queue_refresh(self):
+        """Agrupa los refrescos de la cola: como mucho uno pendiente a la vez."""
+        if self.queue_refresh_pending:
+            return
+        self.queue_refresh_pending = True
+        self.ui(self._run_queue_refresh)
+
+    def _run_queue_refresh(self):
+        self.queue_refresh_pending = False
+        self.refresh_queue_view()
 
     def load_queue_state(self):
         if not os.path.exists(QUEUE_STATE_PATH):
@@ -2872,8 +2904,8 @@ class PSNDownloaderApp(ctk.CTk):
             task.progress = max(0.0, min(1.0, progress))
         if speed:
             task.speed = speed
-        self.save_queue_state()
-        self.ui(self.refresh_queue_view)
+        self.save_queue_state_soon()
+        self.request_queue_refresh()
 
     def complete_task(self, task):
         if not task:
@@ -2882,7 +2914,7 @@ class PSNDownloaderApp(ctk.CTk):
         task.progress = 1.0
         task.completed_at = datetime.now().isoformat(timespec="seconds")
         self.save_queue_state()
-        self.ui(self.refresh_queue_view)
+        self.request_queue_refresh()
 
     def fail_task(self, task, error):
         if not task:
@@ -2890,7 +2922,7 @@ class PSNDownloaderApp(ctk.CTk):
         task.error = str(error)
         task.status = "cancelled" if isinstance(error, DownloadCancelled) else "error"
         self.save_queue_state()
-        self.ui(self.refresh_queue_view)
+        self.request_queue_refresh()
 
     def queue_report_rows(self):
         with self.download_lock:
