@@ -492,13 +492,7 @@ class PSNDownloaderApp(ctk.CTk):
         self.max_active_downloads = int(self.app_config.get("max_active_downloads", 2))
         self.threads_per_download = int(self.app_config.get("threads_per_download", 16))
         self.current_platform = "PS3"
-        self.catalog = {
-            platform: {category: [] for category in CONTENT_ORDER}
-            for platform in PLATFORM_CATALOGS
-        }
-        self.data_store = self.catalog[self.current_platform]
-        self.content_by_url = {}
-        self.content_by_tag = {}
+        self.reset_catalog()
         self.download_manifest = self.load_download_manifest()
         self.download_tasks = {}
         self.download_order = []
@@ -1064,6 +1058,19 @@ class PSNDownloaderApp(ctk.CTk):
         ctk.CTkButton(btn_frame, text="🧹 Limpiar historial", fg_color="#7d2d2d", hover_color="#662323", command=self.clear_history).pack(side="left", fill="x", expand=True, padx=(5, 0))
         self.refresh_history_view()
 
+    def reset_catalog(self):
+        """Vacía el catálogo en memoria y sus índices auxiliares."""
+        self.catalog = {
+            platform: {category: [] for category in CONTENT_ORDER}
+            for platform in PLATFORM_CATALOGS
+        }
+        # catalog_item_key(item) -> posición dentro de self.catalog[platform][category].
+        # La clave ya incluye plataforma y categoría, así que un único índice basta.
+        self.catalog_index = {}
+        self.content_by_url = {}
+        self.content_by_tag = {}
+        self.data_store = self.catalog[self.current_platform]
+
     def add_content_item(
         self,
         platform,
@@ -1099,18 +1106,17 @@ class PSNDownloaderApp(ctk.CTk):
         )
         items = self.catalog[platform][category]
         key = catalog_item_key(item)
-        for index, existing in enumerate(items):
-            if catalog_item_key(existing) != key:
-                continue
-            if catalog_item_score(item) > catalog_item_score(existing):
-                items[index] = item
-                if is_valid_download_url(item.url):
-                    self.content_by_url[item.url] = item
-                self.content_by_tag[self.catalog_item_tag(item)] = item
-                return item
-            return existing
+        index = self.catalog_index.get(key)
 
-        items.append(item)
+        if index is None:
+            self.catalog_index[key] = len(items)
+            items.append(item)
+        else:
+            existing = items[index]
+            if catalog_item_score(item) <= catalog_item_score(existing):
+                return existing
+            items[index] = item
+
         if is_valid_download_url(item.url):
             self.content_by_url[item.url] = item
         self.content_by_tag[self.catalog_item_tag(item)] = item
@@ -1343,12 +1349,7 @@ class PSNDownloaderApp(ctk.CTk):
 
     def load_catalog_from_db(self):
         self.init_catalog_db()
-        self.catalog = {
-            platform: {category: [] for category in CONTENT_ORDER}
-            for platform in PLATFORM_CATALOGS
-        }
-        self.content_by_url = {}
-        self.content_by_tag = {}
+        self.reset_catalog()
         with sqlite3.connect(CATALOG_DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("""
@@ -1438,12 +1439,7 @@ class PSNDownloaderApp(ctk.CTk):
         if self.catalog_db_is_current():
             self.load_catalog_from_db()
         else:
-            self.catalog = {
-                platform: {category: [] for category in CONTENT_ORDER}
-                for platform in PLATFORM_CATALOGS
-            }
-            self.content_by_url = {}
-            self.content_by_tag = {}
+            self.reset_catalog()
             for platform, files in PLATFORM_CATALOGS.items():
                 for category, file_name in files.items():
                     self.load_tsv_catalog(platform, category, file_name)
