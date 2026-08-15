@@ -755,10 +755,10 @@ class PSNDownloaderApp(ctk.CTk):
     def _initial_catalog_load_worker(self):
         try:
             self.load_all_data(populate=False)
-            self.after(0, self.finish_initial_catalog_load)
+            self.ui(self.finish_initial_catalog_load)
         except Exception as e:
             logging.exception("Error cargando catálogos al iniciar: %s", e)
-            self.after(0, lambda: self.fail_initial_catalog_load(e))
+            self.ui(self.fail_initial_catalog_load, e)
 
     def finish_initial_catalog_load(self):
         self.catalog_loading = False
@@ -1508,7 +1508,7 @@ class PSNDownloaderApp(ctk.CTk):
                     json.dumps(details or {}, ensure_ascii=False),
                 )
             )
-        self.after(0, self.refresh_history_view)
+        self.ui(self.refresh_history_view)
 
     def history_report_rows(self, limit=500):
         self.init_catalog_db()
@@ -1785,7 +1785,7 @@ class PSNDownloaderApp(ctk.CTk):
         message = f"Actualizados: {len(updated)}"
         if failed:
             message += f"\nFallidos: {len(failed)}\n" + "\n".join(failed[:8])
-        self.after(0, lambda: self.finish_catalog_update(message))
+        self.ui(self.finish_catalog_update, message)
 
     def finish_catalog_update(self, message):
         self.catalog_update_running = False
@@ -2373,8 +2373,8 @@ class PSNDownloaderApp(ctk.CTk):
                     manifest_entry.update({"status": "corrupt", "integrity": "corrupt", "actual_sha256": actual, "verified_at": datetime.now().isoformat(timespec="seconds")})
         self.save_download_manifest()
         self.record_history("verify_library", self.current_platform, "", "Biblioteca", "complete", {"checked": checked, "corrupt": corrupt})
-        self.after(0, self.refresh_downloads_view)
-        self.after(0, lambda: messagebox.showinfo("Verificar biblioteca", f"Comprobados: {checked}\nCorruptos: {corrupt}"))
+        self.ui(self.refresh_downloads_view)
+        self.ui(messagebox.showinfo, "Verificar biblioteca", f"Comprobados: {checked}\nCorruptos: {corrupt}")
 
     def repair_corrupt_downloads(self):
         repaired = 0
@@ -2676,7 +2676,7 @@ class PSNDownloaderApp(ctk.CTk):
                 self.active_downloads = max(0, self.active_downloads - 1)
                 self.running_task_ids.discard(task_id)
             self.save_queue_state()
-            self.after(0, self.schedule_downloads)
+            self.ui(self.schedule_downloads)
 
     def refresh_queue_view(self):
         if not hasattr(self, "queue_tree"):
@@ -2812,7 +2812,7 @@ class PSNDownloaderApp(ctk.CTk):
         if speed:
             task.speed = speed
         self.save_queue_state()
-        self.after(0, self.refresh_queue_view)
+        self.ui(self.refresh_queue_view)
 
     def complete_task(self, task):
         if not task:
@@ -2821,7 +2821,7 @@ class PSNDownloaderApp(ctk.CTk):
         task.progress = 1.0
         task.completed_at = datetime.now().isoformat(timespec="seconds")
         self.save_queue_state()
-        self.after(0, self.refresh_queue_view)
+        self.ui(self.refresh_queue_view)
 
     def fail_task(self, task, error):
         if not task:
@@ -2829,7 +2829,7 @@ class PSNDownloaderApp(ctk.CTk):
         task.error = str(error)
         task.status = "cancelled" if isinstance(error, DownloadCancelled) else "error"
         self.save_queue_state()
-        self.after(0, self.refresh_queue_view)
+        self.ui(self.refresh_queue_view)
 
     def queue_report_rows(self):
         with self.download_lock:
