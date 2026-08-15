@@ -2,7 +2,8 @@
 import pytest
 import requests
 
-import app
+from psnkiller import downloader as app
+from psnkiller import naming
 
 MB = 1024 * 1024
 
@@ -79,13 +80,13 @@ class TestCategorias:
         ("Temas", "Temas"), ("Avatares", "Avatares"), ("Demos", "Demos"),
     ])
     def test_carpeta_por_categoria(self, categoria, carpeta):
-        assert app.category_folder(categoria) == carpeta
+        assert naming.category_folder(categoria) == carpeta
 
     def test_ida_y_vuelta_con_el_escaneo(self):
         """Las carpetas que crea la descarga deben ser las que reconoce el escaneo."""
         for categoria in ["Juegos", "Updates", "DLCs", "Temas", "Avatares", "Demos"]:
-            carpeta = app.category_folder(categoria)
-            assert app.DOWNLOAD_FOLDER_TO_CATEGORY[carpeta] == categoria
+            carpeta = naming.category_folder(categoria)
+            assert naming.DOWNLOAD_FOLDER_TO_CATEGORY[carpeta] == categoria
 
 
 class TestSha256:

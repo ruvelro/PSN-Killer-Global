@@ -29,7 +29,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p "dist/PSN-Killer-Global-${{ matrix.name }}"
-          cp app.py clean_updates.py requirements.txt README.md catalog_sources.example.json "dist/PSN-Killer-Global-${{ matrix.name }}/"
+          cp app.py clean_updates.py requirements.txt README.md LICENSE catalog_sources.example.json "dist/PSN-Killer-Global-${{ matrix.name }}/"
+          # El paquete psnkiller lleva toda la lógica: sin él la app no arranca.
+          cp -r psnkiller "dist/PSN-Killer-Global-${{ matrix.name }}/"
+          find "dist/PSN-Killer-Global-${{ matrix.name }}/psnkiller" -name '__pycache__' -type d -exec rm -rf {} +
           cp "${{ matrix.launcher }}" "dist/PSN-Killer-Global-${{ matrix.name }}/"
           mkdir -p "dist/PSN-Killer-Global-${{ matrix.name }}/data"
           touch "dist/PSN-Killer-Global-${{ matrix.name }}/data/.gitkeep"

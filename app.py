@@ -1,74 +1,110 @@
-import sys
-import subprocess
-import tkinter as tk
-from tkinter import messagebox
+"""
+PSN Killer Global: interfaz de escritorio.
 
-# ==========================================
-# 0. VERIFICACIÓN E INSTALACIÓN DE DEPENDENCIAS
-# ==========================================
-def verificar_e_instalar_dependencias():
-    librerias_requeridas = {
-        "customtkinter": "customtkinter",
-        "bs4": "beautifulsoup4",
-        "requests": "requests"
-    }
-
-    faltantes = []
-    for mod, pip_name in librerias_requeridas.items():
-        try:
-            __import__(mod)
-        except ImportError:
-            faltantes.append(pip_name)
-
-    if faltantes:
-        root = tk.Tk()
-        root.withdraw()
-
-        mensaje = (
-            f"Para ejecutar esta aplicación se necesitan las siguientes librerías:\n\n"
-            f"• {', '.join(faltantes)}\n\n"
-            f"¿Deseas instalarlas automáticamente ahora mismo?"
-        )
-
-        respuesta = messagebox.askyesno("Librerías Faltantes", mensaje)
-
-        if respuesta:
-            root.destroy()
-            print("⏳ Instalando dependencias, por favor espera...")
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", *faltantes])
-                messagebox.showinfo("Éxito", "¡Librerías instaladas correctamente! Iniciando la app...")
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudieron instalar las librerías automáticamente:\n{e}")
-                sys.exit(1)
-        else:
-            messagebox.showwarning("Cancelado", "La aplicación no puede continuar sin estas librerías.")
-            root.destroy()
-            sys.exit(0)
-
-verificar_e_instalar_dependencias()
-
-# ==========================================
-# IMPORTACIONES PRINCIPALES DE LA APLICACIÓN
-# ==========================================
-import os
+La lógica de negocio vive en el paquete `psnkiller`, que no depende de Tk. Este
+archivo se ocupa sólo de la ventana, del estado de la aplicación y de traducir
+lo que reporta el motor de descarga a la interfaz.
+"""
+import contextlib
 import csv
 import json
-import re
-import time
-import requests
-import threading
-import hashlib
-import shutil
 import logging
+import os
+import re
+import shutil
 import sqlite3
-import contextlib
-from logging.handlers import RotatingFileHandler
-from dataclasses import dataclass, asdict
+import subprocess
+import sys
+import threading
+import time
+import tkinter as tk
+from dataclasses import asdict
 from datetime import datetime
-from difflib import SequenceMatcher
-from tkinter import ttk, filedialog
+from logging.handlers import RotatingFileHandler
+from tkinter import filedialog, messagebox, ttk
+
 import customtkinter as ctk
+import requests
+
+from psnkiller.catalog import (
+    CONTENT_ORDER,
+    GROUPED_DOWNLOAD_PLATFORMS,
+    PLATFORM_CATALOGS,
+    RELATED_CATEGORIES,
+    CatalogIndex,
+    build_header,
+    catalog_item_tag,
+    compatible_region,
+    format_total_size,
+    has_number_conflict,
+    header_value,
+    is_header_row,
+    is_valid_download_url,
+    meaningful_title_tokens,
+    normalize_title,
+    parse_catalog_row,
+    parse_size_to_bytes,
+    row_pkg_url,
+    same_catalog_item,
+    title_similarity,
+    valid_sha256,
+    version_tuple,
+)
+from psnkiller.downloader import FileDownloader, calculate_sha256
+from psnkiller.models import ContentItem, DownloadCancelled, DownloadTask
+from psnkiller.naming import (
+    DOWNLOAD_FOLDER_TO_CATEGORY,
+    category_folder,
+    clamp_path_length,
+    game_key_for,
+    item_filename,
+    manifest_key,
+    partial_path,
+    sanitize_filename,
+    unique_path,
+)
+
+REQUIRED_MODULES = {"customtkinter": "customtkinter", "requests": "requests"}
+
+
+def verificar_e_instalar_dependencias():
+    """
+    Ofrece instalar lo que falte, para quien ejecute app.py sin usar un lanzador.
+
+    Sólo se llama desde __main__: al importarse (tests, herramientas) no debe
+    tener efectos secundarios.
+    """
+    faltantes = [pip_name for mod, pip_name in REQUIRED_MODULES.items()
+                 if not _modulo_disponible(mod)]
+    if not faltantes:
+        return
+
+    root = tk.Tk()
+    root.withdraw()
+    mensaje = (
+        "Para ejecutar esta aplicación se necesitan las siguientes librerías:\n\n"
+        f"• {', '.join(faltantes)}\n\n"
+        "¿Deseas instalarlas automáticamente ahora mismo?"
+    )
+    if not messagebox.askyesno("Librerías Faltantes", mensaje):
+        messagebox.showwarning("Cancelado", "La aplicación no puede continuar sin estas librerías.")
+        root.destroy()
+        sys.exit(0)
+
+    root.destroy()
+    print("⏳ Instalando dependencias, por favor espera...")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *faltantes])
+        messagebox.showinfo("Éxito", "¡Librerías instaladas correctamente! Iniciando la app...")
+    except Exception as e:
+        messagebox.showerror("Error", f"No se pudieron instalar las librerías automáticamente:\n{e}")
+        sys.exit(1)
+
+
+def _modulo_disponible(nombre):
+    import importlib.util
+    return importlib.util.find_spec(nombre) is not None
+
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -135,278 +171,6 @@ def catalog_db():
         conn.close()
 
 
-@dataclass
-class ContentItem:
-    category: str
-    title_id: str
-    region: str
-    name: str
-    version: str
-    size: str
-    url: str
-    content_id: str = ""
-    match_type: str = ""
-    platform: str = "PS3"
-    license_value: str = ""
-    sha256: str = ""
-    required_fw: str = ""
-    original_name: str = ""
-    item_type: str = ""
-
-
-@dataclass
-class DownloadTask:
-    task_id: int
-    url: str
-    dest_path: str
-    title: str
-    platform: str
-    category: str
-    base_item: ContentItem = None
-    manifest_item: ContentItem = None
-    game_key: str = ""
-    status: str = "queued"
-    progress: float = 0.0
-    speed: str = ""
-    error: str = ""
-    created_at: str = ""
-    completed_at: str = ""
-    total_size: int = 0
-    resume_path: str = ""
-
-
-class DownloadCancelled(Exception):
-    pass
-
-
-# Nombres de dispositivo reservados en Windows: no se pueden usar como archivo
-# ni como carpeta, ni siquiera con extensión (CON.pkg también falla).
-WINDOWS_RESERVED_NAMES = {
-    "CON", "PRN", "AUX", "NUL",
-    *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
-}
-MAX_NAME_LENGTH = 100
-# Windows limita a 260 caracteres salvo que se active el soporte de rutas largas.
-MAX_PATH_LENGTH = 240 if os.name == "nt" else 4096
-
-
-def sanitize_filename(filename, max_length=MAX_NAME_LENGTH):
-    r"""
-    Limpia el nombre para que sea válido en Windows, Linux y macOS.
-
-    Además de los caracteres prohibidos (: \ / | ? * " < >) elimina caracteres
-    de control, recorta puntos y espacios finales (Windows los quita en silencio,
-    dejando la ruta del manifest sin corresponder con la del disco) y escapa los
-    nombres de dispositivo reservados.
-    """
-    filename = re.sub(r'[:\\/|]', ' -', filename or "")
-    filename = re.sub(r'[?*"<>]', '', filename)
-    filename = re.sub(r'[\x00-\x1f\x7f]', '', filename)
-    filename = re.sub(r'\s+', ' ', filename).strip()
-    filename = filename[:max_length].strip().rstrip(". ")
-    if filename.split(".")[0].upper() in WINDOWS_RESERVED_NAMES:
-        filename = f"_{filename}"
-    return filename or "sin_nombre"
-
-
-def clamp_path_length(dest_path):
-    """
-    Recorta el nombre del archivo si la ruta completa supera el límite del sistema.
-
-    Se añade un hash corto del nombre original para que dos títulos largos que
-    comparten prefijo no colapsen en la misma ruta.
-    """
-    if len(dest_path) <= MAX_PATH_LENGTH:
-        return dest_path
-
-    directory, filename = os.path.split(dest_path)
-    stem, ext = os.path.splitext(filename)
-    digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()[:8]
-    available = MAX_PATH_LENGTH - len(directory) - len(os.sep) - len(ext) - len(digest) - 1
-    if available < 1:
-        logging.warning("Ruta demasiado larga y no recortable: %s", dest_path)
-        return dest_path
-    return os.path.join(directory, f"{stem[:available].strip()}~{digest}{ext}")
-
-
-def auto_detect_region(tid):
-    """ Detecta la región del juego basándose en el prefijo del Title ID """
-    tid = tid.upper()
-    if len(tid) >= 4:
-        code = tid[:4]
-        if code.startswith(('BCUS', 'BLUS', 'NPUA', 'NPUB', 'NPUG', 'NPUZ', 'UP')):
-            return 'US'
-        elif code.startswith(('BCES', 'BLES', 'NPEA', 'NPEB', 'NPEG', 'NPEZ', 'EP')):
-            return 'EU'
-        elif code.startswith(('BCJS', 'BLJS', 'NPJA', 'NPJB', 'NPJH', 'JP')):
-            return 'ASIA'
-        elif code.startswith(('BCAS', 'BLAS', 'NPHA', 'NPHB', 'HP')):
-            return 'ASIA'
-    return 'ALL'
-
-
-def split_name_and_version(raw_name, default_ver="Base"):
-    """ Separa versiones adosadas al nombre """
-    if not raw_name:
-        return "", default_ver
-
-    match = re.search(r'(.*?)(?:\[?v?(\d{1,2}\.\d{2})\]?)$', raw_name.strip(), re.IGNORECASE)
-    if match and match.group(2):
-        clean_name = match.group(1).strip()
-        version_str = f"v{match.group(2)}"
-        return clean_name, version_str
-
-    return raw_name.strip(), default_ver
-
-
-def extract_version_from_text(text, default_ver="v01.00"):
-    match = re.search(r'\bv[\s.]?(\d+(?:\.\d+)*)\b', text or "", re.IGNORECASE)
-    if match:
-        return f"v{match.group(1)}"
-    return default_ver
-
-
-def format_bytes(bytes_num):
-    """ Convierte un número de bytes en formato MB/GB legible """
-    try:
-        b = float(bytes_num)
-        if b <= 0:
-            return "N/A"
-        if b >= 1024**3:
-            return f"{b / (1024**3):.2f} GB"
-        elif b >= 1024**2:
-            return f"{b / (1024**2):.1f} MB"
-        elif b >= 1024:
-            return f"{b / 1024:.0f} KB"
-        return f"{b:.0f} B"
-    except (ValueError, TypeError):
-        return "N/A"
-
-
-def format_speed(bytes_per_sec):
-    """ Da formato a la velocidad en MB/s y Mbps """
-    if bytes_per_sec <= 0:
-        return "0 KB/s"
-    mb_s = bytes_per_sec / (1024 * 1024)
-    mbps = (bytes_per_sec * 8) / (1024 * 1024)
-    if mb_s >= 1:
-        return f"{mb_s:.1f} MB/s | {mbps:.1f} Mbps"
-    else:
-        kb_s = bytes_per_sec / 1024
-        return f"{kb_s:.0f} KB/s"
-
-
-def parse_size_to_bytes(size_text):
-    if not size_text or size_text in {"N/A", "Sin tamaño", "No disponible"}:
-        return 0
-    match = re.match(r"\s*([\d.]+)\s*([KMGT]?B)\s*$", size_text, re.IGNORECASE)
-    if not match:
-        return 0
-    value = float(match.group(1))
-    unit = match.group(2).upper()
-    multipliers = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
-    return int(value * multipliers.get(unit, 1))
-
-
-def format_total_size(bytes_num):
-    return format_bytes(bytes_num) if bytes_num else "Sin tamaño"
-
-
-BROWSER_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-    'Accept-Encoding': 'identity',
-    'Connection': 'keep-alive',
-    'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"Windows"',
-    'Upgrade-Insecure-Requests': '1',
-    'Cache-Control': 'no-cache'
-}
-
-# Un hilo por debajo de este tamaño no compensa y, si el archivo es menor que el
-# número de hilos, el troceado genera rangos vacíos que el servidor rechaza.
-MIN_BYTES_PER_THREAD = 1024 * 1024
-
-
-def build_download_session(pool_size):
-    """
-    Crea una Session con el pool dimensionado al número de hilos.
-
-    El HTTPAdapter por defecto trae pool_maxsize=10, así que con 16 hilos se
-    descartaban y recreaban conexiones continuamente ("Connection pool is full").
-    """
-    session = requests.Session()
-    session.headers.update(BROWSER_HEADERS)
-    adapter = requests.adapters.HTTPAdapter(
-        pool_connections=pool_size,
-        pool_maxsize=pool_size,
-        max_retries=0,
-    )
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
-
-
-def plan_thread_count(total_size, requested):
-    """Nunca más de un hilo por cada MIN_BYTES_PER_THREAD, para no generar rangos vacíos."""
-    if total_size <= 0:
-        return 1
-    return max(1, min(requested, total_size // MIN_BYTES_PER_THREAD))
-
-
-def calculate_sha256(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def valid_sha256(value):
-    return bool(value and re.fullmatch(r"[a-fA-F0-9]{64}", value.strip()))
-
-
-def data_path(filename):
-    return os.path.join(DATA_DIR, os.path.basename(filename))
-
-
-PLATFORM_CATALOGS = {
-    "PS3": {
-        "Juegos": "PS3_GAMES.tsv",
-        "Updates": "PS3_UPDATES.tsv",
-        "Demos": "PS3_DEMOS.tsv",
-        "Temas": "PS3_THEMES.tsv",
-        "Avatares": "PS3_AVATARS.tsv",
-        "DLCs": "PS3_DLCS.tsv",
-    },
-    "PSP": {
-        "Juegos": "PSP_GAMES.tsv",
-        "Updates": "PSP_UPDATES.tsv",
-        "Demos": "PSP_DEMOS.tsv",
-        "Temas": "PSP_THEMES.tsv",
-        "DLCs": "PSP_DLCS.tsv",
-    },
-    "PSV": {
-        "Juegos": "PSV_GAMES.tsv",
-        "Updates": "PSV_UPDATES.tsv",
-        "Demos": "PSV_DEMOS.tsv",
-        "Temas": "PSV_THEMES.tsv",
-        "DLCs": "PSV_DLCS.tsv",
-    },
-    "PSX": {
-        "Juegos": "PSX_GAMES.tsv",
-    },
-    "PSM": {
-        "Juegos": "PSM_GAMES.tsv",
-    },
-}
-
-CONTENT_ORDER = ["Juegos", "Updates", "DLCs", "Temas", "Avatares", "Demos"]
-GROUPED_DOWNLOAD_PLATFORMS = {"PS3", "PSP", "PSV"}
-RELATED_CATEGORIES = ["Juegos", "Updates", "DLCs", "Temas", "Avatares"]
 DEFAULT_APP_CONFIG = {
     "downloads_dir": DOWNLOADS_DIR,
     "max_active_downloads": 2,
@@ -417,20 +181,6 @@ DEFAULT_APP_CONFIG = {
     "catalog_update_interval_days": 7,
     "download_profile": "Completo seguro",
 }
-MAX_ACTIVE_DOWNLOADS = DEFAULT_APP_CONFIG["max_active_downloads"]
-DOWNLOAD_FOLDER_TO_CATEGORY = {
-    "Base": "Juegos",
-    "Updates": "Updates",
-    "DLCs": "DLCs",
-    "Temas": "Temas",
-    "Avatares": "Avatares",
-    "Demos": "Demos",
-}
-TITLE_STOPWORDS = {
-    "the", "a", "an", "and", "of", "for", "to", "in", "on", "with", "edition",
-    "game", "pack", "bundle", "level", "map", "skin", "costume", "theme", "avatar",
-    "dlc", "update", "add", "content", "ps3", "psp", "psv", "vita", "psn"
-}
 DOWNLOAD_PROFILES = {
     "Base + última update": {"base": True, "latest_update": True, "exact_extras": False, "suggested": False},
     "Completo seguro": {"base": True, "latest_update": True, "exact_extras": True, "suggested": False},
@@ -439,147 +189,8 @@ DOWNLOAD_PROFILES = {
 }
 
 
-def normalize_title(text):
-    text = text.lower()
-    text = text.replace("™", "").replace("®", "")
-    text = re.sub(r"\blittle\s+big\s+planet\b", "littlebigplanet", text)
-    text = re.sub(r"\b(ps3|psn|demo|trial|trial to full|downloader|needs|free|space)\b", " ", text)
-    text = re.sub(r"\b(goty|game of the year|ultimate|complete|edition|digital|stand alone)\b", " ", text)
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def title_tokens(text):
-    return set(normalize_title(text).split())
-
-
-def meaningful_title_tokens(text):
-    return {token for token in title_tokens(text) if token not in TITLE_STOPWORDS and len(token) > 1}
-
-
-def title_numbers(text):
-    return set(re.findall(r"\b\d+\b", normalize_title(text)))
-
-
-def has_number_conflict(base_name, candidate_name):
-    base_numbers = title_numbers(base_name)
-    candidate_numbers = title_numbers(candidate_name)
-    return bool(base_numbers or candidate_numbers) and base_numbers != candidate_numbers
-
-
-def title_similarity(left, right):
-    left_norm = normalize_title(left)
-    right_norm = normalize_title(right)
-    if not left_norm or not right_norm:
-        return 0.0
-
-    left_tokens = set(left_norm.split())
-    right_tokens = set(right_norm.split())
-    token_score = len(left_tokens & right_tokens) / len(left_tokens | right_tokens) if left_tokens and right_tokens else 0
-    sequence_score = SequenceMatcher(None, left_norm, right_norm).ratio()
-
-    if left_norm in right_norm or right_norm in left_norm:
-        return max(token_score, sequence_score, 0.82)
-    return max(token_score, sequence_score)
-
-
-def version_tuple(version):
-    numbers = re.findall(r"\d+", version or "")
-    return tuple(int(n) for n in numbers) if numbers else (0,)
-
-
-def category_folder(category):
-    return {
-        "Juegos": "Base",
-        "Updates": "Updates",
-        "DLCs": "DLCs",
-        "Temas": "Temas",
-        "Avatares": "Avatares",
-        "Demos": "Demos",
-    }.get(category, category)
-
-
-def item_filename(item):
-    clean_title = sanitize_filename(item.name)
-    if item.version and item.version.lower() not in ["base", "n/a", "none"]:
-        return f"{clean_title} {item.version}.pkg"
-    return f"{clean_title}.pkg"
-
-
-def game_key_for(item):
-    """Identificador de carpeta de un juego. Debe ser estable: el manifest lo usa como clave."""
-    name = sanitize_filename(item.name)
-    return f"{name} [{item.title_id}]" if item.title_id else name
-
-
-def unique_path(dest_path):
-    counter = 1
-    base_name, ext = os.path.splitext(dest_path)
-    while os.path.exists(dest_path):
-        dest_path = f"{base_name} ({counter}){ext}"
-        counter += 1
-    return dest_path
-
-
-def partial_path(dest_path):
-    return f"{dest_path}.part"
-
-
-def manifest_key(game_key, item):
-    return f"{item.platform}|{game_key}|{item.category}|{item.title_id}|{item.version}|{item.url}"
-
-
-def compatible_region(base_region, candidate_region):
-    if not base_region or not candidate_region:
-        return True
-    return candidate_region in {base_region, "ALL", "FREE", "INT"}
-
-
-def same_catalog_item(left, right):
-    if left.url and right.get("url") and left.url == right.get("url"):
-        return True
-    if right.get("path") and os.path.basename(right["path"]).lower() == item_filename(left).lower():
-        return True
-    return (
-        left.category == right.get("category")
-        and left.title_id == right.get("title_id")
-        and left.name == right.get("name")
-        and left.version == right.get("version")
-    )
-
-
-def is_valid_download_url(url):
-    return (url or "").strip().lower().startswith(("http://", "https://"))
-
-
-def is_missing_value(value):
-    return not (value or "").strip() or (value or "").strip().upper() in {"MISSING", "N/A", "NA"}
-
-
-def catalog_item_key(item):
-    if item.content_id:
-        return ("content_id", item.platform, item.category, item.content_id)
-    if is_valid_download_url(item.url):
-        return ("url", item.platform, item.category, item.url)
-    return (
-        "fallback",
-        item.platform,
-        item.category,
-        item.title_id,
-        item.region,
-        normalize_title(item.name),
-        item.version,
-    )
-
-
-def catalog_item_score(item):
-    score = 0
-    score += 100 if is_valid_download_url(item.url) else 0
-    score += 30 if not is_missing_value(item.license_value) else 0
-    score += 20 if not is_missing_value(item.sha256) else 0
-    score += 10 if parse_size_to_bytes(item.size) else 0
-    score += 5 if not is_missing_value(item.required_fw) else 0
-    return score
+def data_path(filename):
+    return os.path.join(DATA_DIR, os.path.basename(filename))
 
 
 class PSNDownloaderApp(ctk.CTk):
@@ -1222,158 +833,45 @@ class PSNDownloaderApp(ctk.CTk):
         ctk.CTkButton(btn_frame, text="🧹 Limpiar historial", fg_color="#7d2d2d", hover_color="#662323", command=self.clear_history).pack(side="left", fill="x", expand=True, padx=(5, 0))
         self.refresh_history_view()
 
+    # -- Estado del catálogo -------------------------------------------------
+    # El almacén y su índice viven en psnkiller.catalog.CatalogIndex. Estas
+    # propiedades lo exponen con los nombres que ya usaba el resto de la clase.
+
     def reset_catalog(self):
         """Vacía el catálogo en memoria y sus índices auxiliares."""
-        self.catalog = {
-            platform: {category: [] for category in CONTENT_ORDER}
-            for platform in PLATFORM_CATALOGS
-        }
-        # catalog_item_key(item) -> posición dentro de self.catalog[platform][category].
-        # La clave ya incluye plataforma y categoría, así que un único índice basta.
-        self.catalog_index = {}
-        self.content_by_url = {}
-        self.content_by_tag = {}
+        self._catalog = CatalogIndex()
         self.data_store = self.catalog[self.current_platform]
 
-    def add_content_item(
-        self,
-        platform,
-        category,
-        title_id,
-        region,
-        name,
-        version,
-        size,
-        url,
-        content_id="",
-        license_value="",
-        sha256="",
-        required_fw="",
-        original_name="",
-        item_type=""
-    ):
-        item = ContentItem(
-            category=category,
-            title_id=title_id,
-            region=region,
-            name=name,
-            version=version,
-            size=size,
-            url=url,
-            content_id=content_id,
-            platform=platform,
-            license_value=license_value,
-            sha256=sha256,
-            required_fw=required_fw,
-            original_name=original_name,
-            item_type=item_type
-        )
-        items = self.catalog[platform][category]
-        key = catalog_item_key(item)
-        index = self.catalog_index.get(key)
+    @property
+    def catalog(self):
+        return self._catalog.catalog
 
-        if index is None:
-            self.catalog_index[key] = len(items)
-            items.append(item)
-        else:
-            existing = items[index]
-            if catalog_item_score(item) <= catalog_item_score(existing):
-                return existing
-            items[index] = item
+    @property
+    def catalog_index(self):
+        return self._catalog.index
 
-        if is_valid_download_url(item.url):
-            self.content_by_url[item.url] = item
-        self.content_by_tag[self.catalog_item_tag(item)] = item
-        return item
+    @property
+    def content_by_url(self):
+        return self._catalog.by_url
+
+    @property
+    def content_by_tag(self):
+        return self._catalog.by_tag
+
+    def add_content_item(self, **fields):
+        return self._catalog.add(**fields)
 
     def catalog_item_tag(self, item):
-        return "|".join(str(part) for part in catalog_item_key(item))
-
-    def header_value(self, row, header, *names):
-        for name in names:
-            index = header.get(name.lower())
-            if index is not None and index < len(row):
-                return row[index].strip()
-        return ""
-
-    def row_pkg_url(self, row, header):
-        if header:
-            for name in ("pkg direct link", "update url", "download url", "url"):
-                value = self.header_value(row, header, name)
-                if is_valid_download_url(value):
-                    return value
-            return ""
-        url_index = next((i for i, col in enumerate(row) if col.strip().startswith(("http://", "https://"))), None)
-        return row[url_index].strip() if url_index is not None else ""
+        return catalog_item_tag(item)
 
     def parse_catalog_row(self, platform, category, row, header=None):
-        if not row:
-            return None
+        return parse_catalog_row(platform, category, row, header)
 
-        if header is None and row[0].strip().lower() in ["title id", "id", "title_id"]:
-            return None
+    def header_value(self, row, header, *names):
+        return header_value(row, header, *names)
 
-        url = self.row_pkg_url(row, header)
-        title_id = self.header_value(row, header, "title id") if header else row[0].strip()
-        region = self.header_value(row, header, "region") if header else ""
-        name = self.header_value(row, header, "name") if header else ""
-        version = "Base"
-        content_id = self.header_value(row, header, "content id") if header else ""
-        license_value = self.header_value(row, header, "zrif", "rap") if header else ""
-        file_size = self.header_value(row, header, "file size") if header else ""
-        sha256 = self.header_value(row, header, "sha256") if header else ""
-        required_fw = self.header_value(row, header, "required fw", "required fw version") if header else ""
-        original_name = self.header_value(row, header, "original name") if header else ""
-        item_type = self.header_value(row, header, "type") if header else ""
-
-        if platform == "PS3" and category == "Updates" and not header:
-            title_id = row[0].strip()
-            name = row[1].strip() if len(row) > 1 else f"Actualización ({title_id})"
-            version = row[2].strip() if len(row) > 2 else "v01.00"
-        elif category == "Updates":
-            version = self.header_value(row, header, "update version")
-            if version:
-                version = version if version.lower().startswith("v") else f"v{version}"
-            else:
-                version = extract_version_from_text(name, "v01.00")
-
-        if platform == "PSP" and category == "Juegos" and header:
-            name = self.header_value(row, header, "name")
-
-        if not name and len(row) > 1:
-            name = row[1].strip()
-        if not region:
-            region = auto_detect_region(title_id)
-        if not name or re.match(r'^[a-fA-F0-9]{15,}', name):
-            name = f"Contenido ({title_id})"
-
-        clean_name, name_version = split_name_and_version(name, version)
-        if category != "Updates" or version == "Base":
-            version = name_version
-
-        size_str = format_bytes(file_size) if file_size.isdigit() else "Sin tamaño"
-        if size_str == "Sin tamaño" and url:
-            size_match = re.search(r'\.pkg(\d+)$', url, re.IGNORECASE)
-            size_str = format_bytes(size_match.group(1)) if size_match else "Sin tamaño"
-        if not url:
-            size_str = "No disponible"
-
-        return {
-            "platform": platform,
-            "category": category,
-            "title_id": title_id,
-            "region": region,
-            "name": clean_name,
-            "version": version,
-            "size": size_str,
-            "url": url,
-            "content_id": content_id,
-            "license_value": license_value,
-            "sha256": sha256,
-            "required_fw": required_fw,
-            "original_name": original_name,
-            "item_type": item_type,
-        }
+    def row_pkg_url(self, row, header):
+        return row_pkg_url(row, header)
 
     def load_tsv_catalog(self, platform, category, file_name):
         file_path = data_path(file_name)
@@ -1386,8 +884,8 @@ class PSNDownloaderApp(ctk.CTk):
             if not first_row:
                 return
 
-            has_header = first_row[0].strip().lower() in ["title id", "id", "title_id"]
-            header = {name.strip().lower(): index for index, name in enumerate(first_row)} if has_header else None
+            has_header = is_header_row(first_row)
+            header = build_header(first_row) if has_header else None
             rows = reader if has_header else [first_row, *reader]
 
             for row in rows:
@@ -1688,8 +1186,8 @@ class PSNDownloaderApp(ctk.CTk):
                 first_row = next(reader, None)
                 if not first_row:
                     return False, 0, "catálogo vacío"
-                has_header = first_row[0].strip().lower() in ["title id", "id", "title_id"]
-                header = {name.strip().lower(): index for index, name in enumerate(first_row)} if has_header else None
+                has_header = is_header_row(first_row)
+                header = build_header(first_row) if has_header else None
                 rows = reader if has_header else [first_row, *reader]
                 for row in rows:
                     parsed_row = self.parse_catalog_row(platform, category, row, header)
@@ -2781,7 +2279,7 @@ class PSNDownloaderApp(ctk.CTk):
     def run_download_task(self, task_id):
         task = self.download_tasks[task_id]
         try:
-            self._requests_fast_download(
+            self.run_download(
                 task.url,
                 task.dest_path,
                 task.title,
@@ -3448,137 +2946,57 @@ class PSNDownloaderApp(ctk.CTk):
         self.enqueue_download(GITHUB_RAP_URL, filename, "Licencias (31.153 .pkg)", "RAP", "PS3")
         self.status_label.configure(text="Licencias añadidas a la cola")
 
-    def _requests_fast_download(self, url, dest_path, title, base_item=None, manifest_item=None, game_key=None, task=None):
+    def run_download(self, url, dest_path, title, base_item=None, manifest_item=None, game_key=None, task=None):
         """
-        Motor de descarga Ultra-Turbo con 16 hilos simultáneos y huella de navegador web de alta gama.
+        Orquesta una descarga: motor, verificación de integridad y estado de la tarea.
+
+        El trabajo de red lo hace psnkiller.downloader.FileDownloader, que no
+        conoce Tk. Aquí sólo se traduce lo que reporta a estado de la aplicación,
+        y toda actualización de interfaz pasa por self.ui().
         """
+        filename = os.path.basename(dest_path)
+
+        def on_progress(fraction, speed_text, _threads):
+            self.ui(self.set_progress, fraction)
+            self.update_task_progress(task, fraction, speed_text)
+
+        downloader = FileDownloader(
+            threads_per_download=self.threads_per_download,
+            on_progress=on_progress,
+            on_status=lambda text: self.ui(self.set_status, text),
+            check_control=lambda: self.wait_if_task_paused(task),
+        )
+
         try:
             logging.info("Descarga iniciada: %s -> %s", title, dest_path)
-            self.wait_if_task_paused(task)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            temp_path = partial_path(dest_path)
             if task:
-                task.resume_path = temp_path
-            requested_threads = max(1, self.threads_per_download)
-            session = build_download_session(requested_threads)
+                task.resume_path = partial_path(dest_path)
 
-            head_res = session.head(url, allow_redirects=True, timeout=10)
-            total_size = int(head_res.headers.get('content-length', 0))
-            accept_ranges = head_res.headers.get('accept-ranges', '').lower()
-            if task:
-                task.total_size = total_size
+            downloader.download(url, dest_path)
 
-            num_threads = plan_thread_count(total_size, requested_threads)
-            existing_partial = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
-            if total_size <= 0 or 'bytes' not in accept_ranges or existing_partial or num_threads < 2:
-                self._single_thread_download(session, url, dest_path, title, total_size, task)
-                if base_item and manifest_item and game_key:
-                    final_status = self.verify_download_integrity(base_item, manifest_item, game_key, dest_path)
-                    self.ui(self.refresh_downloads_view)
-                    if final_status == "corrupt":
-                        if task:
-                            task.status = "corrupt"
-                            task.progress = 1.0
-                            task.error = "SHA256 no coincide"
-                            self.ui(self.refresh_queue_view)
-                        self.ui(self.set_status, f"Corrupto: {os.path.basename(dest_path)}")
-                        return
-                self.complete_task(task)
-                return
-
-            chunk_size = total_size // num_threads
-            lock = threading.Lock()
-            downloaded_bytes = [0] * num_threads
-            part_errors = []
-
-            with open(temp_path, 'wb') as f:
-                f.truncate(total_size)
-
-            def download_part(thread_id, start, end):
-                nonlocal downloaded_bytes
-                headers = {'Range': f'bytes={start}-{end}'}
-                try:
-                    with session.get(url, headers=headers, stream=True, timeout=20) as r:
-                        r.raise_for_status()
-                        current_pos = start
-                        with open(temp_path, 'r+b') as f:
-                            f.seek(current_pos)
-                            for chunk in r.iter_content(chunk_size=131072):
-                                self.wait_if_task_paused(task)
-                                if chunk:
-                                    f.write(chunk)
-                                    current_pos += len(chunk)
-                                    with lock:
-                                        downloaded_bytes[thread_id] = current_pos - start
-                except Exception as e:
-                    with lock:
-                        part_errors.append(e)
-
-            start_time = time.time()
-            last_time = start_time
-            last_total_downloaded = 0
-
-            threads = []
-            for i in range(num_threads):
-                start = i * chunk_size
-                end = (total_size - 1) if i == num_threads - 1 else (start + chunk_size - 1)
-                t = threading.Thread(target=download_part, args=(i, start, end), daemon=True)
-                threads.append(t)
-                t.start()
-
-            while any(t.is_alive() for t in threads):
-                self.wait_if_task_paused(task)
-                time.sleep(0.2)
-                with lock:
-                    current_total = sum(downloaded_bytes)
-
-                now = time.time()
-                elapsed = now - last_time
-                if elapsed >= 0.2:
-                    speed = (current_total - last_total_downloaded) / elapsed
-                    speed_str = format_speed(speed)
-                    percent = current_total / total_size if total_size > 0 else 0
-
-                    self.ui(self.set_progress, percent)
-                    self.update_task_progress(task, percent, speed_str)
-                    display_filename = os.path.basename(dest_path)
-                    self.ui(
-                        self.set_status,
-                        f"Descargando ({num_threads} hilos): {display_filename}... [{speed_str}]"
-                    )
-
-                    last_total_downloaded = current_total
-                    last_time = now
-
-            for t in threads:
-                t.join()
-
-            if part_errors:
-                raise part_errors[0]
-
-            os.replace(temp_path, dest_path)
-            self.ui(self.set_progress, 1.0)
-            self.ui(self.set_status, f"✅ Finalizado: {os.path.basename(dest_path)}")
             if base_item and manifest_item and game_key:
-                final_status = self.verify_download_integrity(base_item, manifest_item, game_key, dest_path)
-                self.ui(self.refresh_downloads_view)
-                if final_status == "corrupt":
+                if self.verify_download_integrity(base_item, manifest_item, game_key, dest_path) == "corrupt":
                     if task:
                         task.status = "corrupt"
                         task.progress = 1.0
                         task.error = "SHA256 no coincide"
-                        self.ui(self.refresh_queue_view)
-                    self.ui(self.set_status, f"Corrupto: {os.path.basename(dest_path)}")
+                        self.save_queue_state()
+                        self.request_queue_refresh()
+                    self.ui(self.refresh_downloads_view)
+                    self.ui(self.set_status, f"Corrupto: {filename}")
                     return
+                self.ui(self.refresh_downloads_view)
+
             self.complete_task(task)
-            logging.info("Descarga completada: %s", dest_path)
-            self.record_history("download", task.platform if task else "", task.category if task else "", title, "complete", {"path": dest_path})
+            self.record_history("download", task.platform if task else "", task.category if task else "",
+                                title, "complete", {"path": dest_path})
 
         except DownloadCancelled as e:
             self.fail_task(task, e)
             logging.info("Descarga cancelada: %s", dest_path)
-            self.record_history("download", task.platform if task else "", task.category if task else "", title, "cancelled", {"path": dest_path})
-            self.ui(self.set_status, f"Cancelado: {os.path.basename(dest_path)}")
+            self.record_history("download", task.platform if task else "", task.category if task else "",
+                                title, "cancelled", {"path": dest_path})
+            self.ui(self.set_status, f"Cancelado: {filename}")
             if base_item and manifest_item and game_key:
                 self.register_manifest_entry(base_item, manifest_item, game_key, dest_path, "cancelled")
                 self.ui(self.refresh_downloads_view)
@@ -3586,70 +3004,19 @@ class PSNDownloaderApp(ctk.CTk):
             self.ui(self.set_status, "❌ Error en la descarga")
             self.fail_task(task, e)
             logging.exception("Error descargando %s: %s", title, e)
-            self.record_history("download", task.platform if task else "", task.category if task else "", title, "error", {"path": dest_path, "error": str(e)})
+            self.record_history("download", task.platform if task else "", task.category if task else "",
+                                title, "error", {"path": dest_path, "error": str(e)})
             if base_item and manifest_item and game_key:
                 self.register_manifest_entry(base_item, manifest_item, game_key, dest_path, "error")
                 self.ui(self.refresh_downloads_view)
             # El diálogo se abre en el hilo principal: si no, bloquea la descarga y rompe Tk.
             self.ui(messagebox.showerror, "Error de Descarga", f"No se pudo descargar {title}:\n{e}")
 
-    def _single_thread_download(self, session, url, dest_path, title, total_size, task=None):
-        start_time = time.time()
-        last_time = start_time
-        temp_path = partial_path(dest_path)
-        resume_from = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
-        downloaded_bytes = resume_from
-        last_bytes = resume_from
-        headers = {}
-        mode = "ab" if resume_from else "wb"
-        if resume_from and total_size and resume_from < total_size:
-            headers["Range"] = f"bytes={resume_from}-"
-        elif resume_from and total_size and resume_from >= total_size:
-            os.replace(temp_path, dest_path)
-            self.ui(self.set_progress, 1.0)
-            self.update_task_progress(task, 1.0, "")
-            return
 
-        with session.get(url, headers=headers, stream=True, timeout=15) as response:
-            response.raise_for_status()
-            if resume_from and headers and response.status_code != 206:
-                mode = "wb"
-                downloaded_bytes = 0
-                last_bytes = 0
-            with open(temp_path, mode) as f:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    self.wait_if_task_paused(task)
-                    if chunk:
-                        f.write(chunk)
-                        downloaded_bytes += len(chunk)
-
-                        now = time.time()
-                        elapsed = now - last_time
-                        if elapsed >= 0.2:
-                            speed = (downloaded_bytes - last_bytes) / elapsed
-                            speed_str = format_speed(speed)
-
-                            if total_size > 0:
-                                progress = min(1.0, downloaded_bytes / total_size)
-                                self.ui(self.set_progress, progress)
-                                self.update_task_progress(task, progress, speed_str)
-
-                            self.ui(
-                                self.set_status,
-                                f"Descargando: {os.path.basename(dest_path)}... [{speed_str}]"
-                            )
-                            last_bytes = downloaded_bytes
-                            last_time = now
-
-        os.replace(temp_path, dest_path)
-        self.ui(self.set_progress, 1.0)
-        self.update_task_progress(task, 1.0, "")
-        self.ui(self.set_status, f"✅ Finalizado: {os.path.basename(dest_path)}")
-
-
-PS3DownloaderApp = PSNDownloaderApp
+def main():
+    verificar_e_instalar_dependencias()
+    PSNDownloaderApp().mainloop()
 
 
 if __name__ == "__main__":
-    app = PSNDownloaderApp()
-    app.mainloop()
+    main()

@@ -1,7 +1,7 @@
 """Parseo, normalización y deduplicación del catálogo."""
 import pytest
 
-import app
+from psnkiller import catalog as app
 
 
 class TestRegion:

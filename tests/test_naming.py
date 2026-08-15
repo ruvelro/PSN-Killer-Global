@@ -3,7 +3,8 @@ import os
 
 import pytest
 
-import app
+from psnkiller import naming as app
+from psnkiller.models import ContentItem
 
 
 class TestSanitizeFilename:
@@ -51,18 +52,20 @@ class TestClampPathLength:
         ruta = os.path.join("dir", "archivo.pkg")
         assert app.clamp_path_length(ruta) == ruta
 
-    def test_recorta_por_encima_del_limite(self, monkeypatch):
-        monkeypatch.setattr(app, "MAX_PATH_LENGTH", 120)
+    def test_recorta_por_encima_del_limite(self):
+        """El límite se pasa explícito para poder simular Windows desde cualquier sistema."""
         ruta = os.path.join("carpeta", "N" * 300 + ".pkg")
-        recortada = app.clamp_path_length(ruta)
+        recortada = app.clamp_path_length(ruta, max_path_length=120)
         assert len(recortada) <= 120
         assert recortada.endswith(".pkg")
 
-    def test_no_colisionan_titulos_con_prefijo_comun(self, monkeypatch):
-        monkeypatch.setattr(app, "MAX_PATH_LENGTH", 120)
-        a = app.clamp_path_length(os.path.join("d", "X" * 200 + "Alpha.pkg"))
-        b = app.clamp_path_length(os.path.join("d", "X" * 200 + "Beta.pkg"))
+    def test_no_colisionan_titulos_con_prefijo_comun(self):
+        a = app.clamp_path_length(os.path.join("d", "X" * 200 + "Alpha.pkg"), max_path_length=120)
+        b = app.clamp_path_length(os.path.join("d", "X" * 200 + "Beta.pkg"), max_path_length=120)
         assert a != b
+
+    def test_limite_de_windows_mas_estricto_que_el_resto(self):
+        assert app.MAX_PATH_LENGTH == (240 if os.name == "nt" else 4096)
 
 
 class TestItemFilename:
@@ -70,7 +73,7 @@ class TestItemFilename:
         base = dict(category="Juegos", title_id="BLES00483", region="EU",
                     name="Killzone 2", version="Base", size="10 GB", url="http://x/y.pkg")
         base.update(kwargs)
-        return app.ContentItem(**base)
+        return ContentItem(**base)
 
     def test_version_base_no_aparece(self):
         assert app.item_filename(self._item()) == "Killzone 2.pkg"
@@ -85,15 +88,15 @@ class TestItemFilename:
 
 class TestGameKey:
     def test_incluye_title_id(self):
-        item = app.ContentItem("Juegos", "BLES00483", "EU", "Killzone 2", "Base", "10 GB", "u")
+        item = ContentItem("Juegos", "BLES00483", "EU", "Killzone 2", "Base", "10 GB", "u")
         assert app.game_key_for(item) == "Killzone 2 [BLES00483]"
 
     def test_sin_title_id(self):
-        item = app.ContentItem("Juegos", "", "EU", "Suelto", "Base", "1 GB", "u")
+        item = ContentItem("Juegos", "", "EU", "Suelto", "Base", "1 GB", "u")
         assert app.game_key_for(item) == "Suelto"
 
     def test_saneado(self):
-        item = app.ContentItem("Juegos", "BLES1", "EU", "Ratchet: Size", "Base", "1 GB", "u")
+        item = ContentItem("Juegos", "BLES1", "EU", "Ratchet: Size", "Base", "1 GB", "u")
         assert app.game_key_for(item) == "Ratchet - Size [BLES1]"
 
 
